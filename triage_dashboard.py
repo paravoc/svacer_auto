@@ -16,6 +16,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from triage_queue import markers_for_triage
+
 
 VALID_VERDICTS = {"Confirmed", "False Positive", "Won't fix", "Unclear"}
 NOTE_RE = re.compile(r"^batch-(\d+)-worker-(\d+)\.json$", re.IGNORECASE)
@@ -71,6 +73,8 @@ def collect_state(job: Path) -> dict:
     state: dict[str, Any] = {
         "job": job.name,
         "job_path": str(job),
+        "inventory_total": 0,
+        "already_reviewed": 0,
         "total": 0,
         "completed": 0,
         "pending": 0,
@@ -84,19 +88,29 @@ def collect_state(job: Path) -> dict:
     }
     inventory_path = job / "markers.inventory.json"
     decisions_path = job / "decisions.jsonl"
+    target_ids: set[str] = set()
     try:
         if inventory_path.exists():
             inventory = read_json(inventory_path)
             markers = inventory.get("markers") if isinstance(inventory, dict) else None
-            state["total"] = len(markers) if isinstance(markers, list) else 0
+            if isinstance(markers, list):
+                target_markers = markers_for_triage(markers)
+                target_ids = {str(marker.get("id") or "") for marker in target_markers}
+                state["inventory_total"] = len(markers)
+                state["already_reviewed"] = len(markers) - len(target_markers)
+                state["total"] = len(target_markers)
+            else:
+                target_ids = set()
         if decisions_path.exists():
             decisions = read_jsonl(decisions_path)
             state["by_verdict"] = Counter(
-                row.get("verdict") for row in decisions if row.get("verdict") in VALID_VERDICTS
+                row.get("verdict") for row in decisions
+                if str(row.get("marker_id") or "") in target_ids
+                and row.get("verdict") in VALID_VERDICTS
             )
             state["completed"] = sum(state["by_verdict"].values())
         state["pending"] = max(0, state["total"] - state["completed"])
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, json.JSONDecodeError, SystemExit) as exc:
         state["errors"].append(f"inventory/decisions: {exc}")
 
     worker_saved: dict[int, set[str]] = defaultdict(set)
@@ -211,6 +225,10 @@ def render(
         f"Задача: {state['job']}",
         f"Результаты: {state['job_path']}",
         f"MCP: {paint(mcp_status, 'green' if mcp_status == 'подключён' else 'yellow', use_color)}",
+        (
+            f"Область: ГОСТ {state.get('inventory_total', total)} | "
+            f"уже размечено {state.get('already_reviewed', 0)} | для доразметки {total}"
+        ),
         (
             "Прогресс: "
             f"[{paint(progress_bar(completed, total), bar_color, use_color)}] "

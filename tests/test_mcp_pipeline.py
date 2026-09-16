@@ -33,6 +33,84 @@ def inventory() -> dict:
     }
 
 
+def inventory_with_existing_review() -> dict:
+    value = inventory()
+    value["markers"][0]["review"] = {
+        "status": "False Positive",
+        "severity": "Unspecified",
+        "action": "Undecided",
+    }
+    value["markers"][1]["review"] = None
+    return value
+
+
+def test_existing_svacer_review_is_skipped_automatically(tmp_path: Path) -> None:
+    inventory_path = tmp_path / "inventory.json"
+    decisions_path = tmp_path / "decisions.jsonl"
+    inventory_path.write_text(json.dumps(inventory_with_existing_review()), encoding="utf-8")
+
+    created = run_script(
+        "make_mcp_decisions_template.py",
+        "--inventory", str(inventory_path),
+        "--out", str(decisions_path),
+    )
+    assert created.returncode == 0, created.stderr
+    rows = [json.loads(line) for line in decisions_path.read_text().splitlines()]
+    assert [row["marker_id"] for row in rows] == ["m2"]
+    assert "Уже размечено в Svacer: 1" in created.stdout
+    assert "Для доразметки: 1" in created.stdout
+
+    queued = run_script(
+        "triage_queue.py",
+        "--inventory", str(inventory_path),
+        "--decisions", str(decisions_path),
+        "next", "--limit", "15", "--workers", "3",
+    )
+    assert queued.returncode == 0, queued.stderr
+    payload = json.loads(queued.stdout)
+    assert payload["progress"] == {
+        "inventory_total": 2,
+        "already_reviewed": 1,
+        "total": 1,
+        "completed": 0,
+        "pending": 1,
+        "by_verdict": {
+            "Confirmed": 0,
+            "False Positive": 0,
+            "Unclear": 0,
+            "Won't fix": 0,
+        },
+    }
+    assert payload["batch"]["marker_ids"] == ["m2"]
+
+
+def test_legacy_full_template_skips_previously_reviewed_rows(tmp_path: Path) -> None:
+    inventory_path = tmp_path / "inventory.json"
+    decisions_path = tmp_path / "decisions.jsonl"
+    inventory_path.write_text(json.dumps(inventory_with_existing_review()), encoding="utf-8")
+    legacy_inventory = inventory()
+    legacy_path = tmp_path / "legacy-inventory.json"
+    legacy_path.write_text(json.dumps(legacy_inventory), encoding="utf-8")
+    created = run_script(
+        "make_mcp_decisions_template.py",
+        "--inventory", str(legacy_path),
+        "--out", str(decisions_path),
+    )
+    assert created.returncode == 0
+
+    queued = run_script(
+        "triage_queue.py",
+        "--inventory", str(inventory_path),
+        "--decisions", str(decisions_path),
+        "next", "--limit", "15",
+    )
+    assert queued.returncode == 0, queued.stderr
+    payload = json.loads(queued.stdout)
+    assert payload["progress"]["total"] == 1
+    assert payload["progress"]["already_reviewed"] == 1
+    assert payload["batch"]["marker_ids"] == ["m2"]
+
+
 def test_template_validation_and_csv(tmp_path: Path) -> None:
     inventory_path = tmp_path / "inventory.json"
     decisions_path = tmp_path / "decisions.jsonl"

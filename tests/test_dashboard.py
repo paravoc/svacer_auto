@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from test_mcp_pipeline import inventory, run_script
+from test_mcp_pipeline import inventory, inventory_with_existing_review, run_script
 from triage_dashboard import collect_state, describe_exception, mcp_text, render, set_pause
 
 
@@ -42,6 +42,28 @@ def test_dashboard_reports_saved_work_and_current_assignment(tmp_path):
     assert state["workers"][1]["saved"] == 1
     assert state["workers"][1]["assigned"] == 1
     assert "1/2" in render(state)
+
+
+def test_dashboard_counts_only_markers_that_need_triage(tmp_path):
+    job = tmp_path / "job"
+    job.mkdir()
+    inv = inventory_with_existing_review()
+    write_json(job / "markers.inventory.json", inv)
+    decisions = [
+        {"marker_id": "m1", "verdict": None},
+        {"marker_id": "m2", "verdict": None},
+    ]
+    (job / "decisions.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in decisions), encoding="utf-8"
+    )
+
+    state = collect_state(job)
+
+    assert state["inventory_total"] == 2
+    assert state["already_reviewed"] == 1
+    assert state["total"] == 1
+    assert state["pending"] == 1
+    assert "уже размечено 1 | для доразметки 1" in render(state)
 
 
 def test_pause_file_stops_queue_before_new_batch(tmp_path):

@@ -8,7 +8,7 @@ import json
 import sys
 from collections import Counter
 from pathlib import Path
-from triage_queue import load_inventory, validate_worker_result
+from triage_queue import load_inventory, markers_for_triage, validate_worker_result
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -37,9 +37,9 @@ def main() -> int:
     parser.add_argument("--decisions", required=True)
     args = parser.parse_args()
 
-    inventory = {str(marker["id"]): marker for marker in load_inventory(
-        Path(args.inventory).expanduser().resolve()
-    )}
+    all_markers = load_inventory(Path(args.inventory).expanduser().resolve())
+    all_inventory = {str(marker["id"]): marker for marker in all_markers}
+    inventory = {str(marker["id"]): marker for marker in markers_for_triage(all_markers)}
     decisions = read_jsonl(Path(args.decisions).expanduser().resolve())
     seen: Counter[str] = Counter()
     errors: list[str] = []
@@ -47,8 +47,10 @@ def main() -> int:
     for decision in decisions:
         marker_id = str(decision.get("marker_id") or "")
         seen[marker_id] += 1
-        if marker_id not in inventory:
+        if marker_id not in all_inventory:
             errors.append(f"неизвестный marker_id: {marker_id}")
+            continue
+        if marker_id not in inventory:
             continue
         marker = inventory[marker_id]
         errors.extend(validate_worker_result(decision, marker))
@@ -59,8 +61,11 @@ def main() -> int:
         elif seen[marker_id] > 1:
             errors.append(f"дубликат решения: {marker_id}")
 
-    print(f"Маркеров: {len(inventory)}")
-    print(f"Решений: {len(decisions)}")
+    target_decisions = [item for item in decisions if str(item.get("marker_id") or "") in inventory]
+    print(f"ГОСТ-маркеров всего: {len(all_inventory)}")
+    print(f"Уже размечено в Svacer: {len(all_inventory) - len(inventory)}")
+    print(f"Для доразметки: {len(inventory)}")
+    print(f"Локальных решений: {len(target_decisions)}")
     if errors:
         print(f"Ошибок: {len(errors)}")
         for error in errors[:200]:
@@ -68,7 +73,7 @@ def main() -> int:
         return 2
 
     print("Проверка пройдена")
-    for verdict, count in sorted(Counter(item["verdict"] for item in decisions).items()):
+    for verdict, count in sorted(Counter(item["verdict"] for item in target_decisions).items()):
         print(f"{verdict}: {count}")
     return 0
 

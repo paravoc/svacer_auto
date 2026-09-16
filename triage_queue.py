@@ -73,21 +73,47 @@ def load_decisions(path: Path) -> list[dict]:
     return result
 
 
+def marker_review_status(marker: dict) -> str:
+    """Return the current Svacer review status from a compact marker row."""
+    review = marker.get("review")
+    if review is None:
+        return "Undecided"
+    if isinstance(review, dict):
+        status = review.get("status")
+    elif isinstance(review, str):
+        status = review
+    else:
+        raise SystemExit("Некорректное поле review в inventory.json")
+    normalized = str(status or "").strip()
+    if not normalized or normalized.casefold() == "undecided":
+        return "Undecided"
+    return normalized
+
+
+def markers_for_triage(inventory: list[dict]) -> list[dict]:
+    """Select only markers that had no review when the inventory was saved."""
+    return [marker for marker in inventory if marker_review_status(marker) == "Undecided"]
+
+
 def state(inventory: list[dict], decisions: list[dict]) -> tuple[dict[str, dict], Counter]:
     by_id = {str(item.get("marker_id") or ""): item for item in decisions}
     if "" in by_id or len(by_id) != len(decisions):
         raise SystemExit("Пустые или повторяющиеся marker_id в decisions.jsonl")
-    inventory_ids = {str(marker["id"]) for marker in inventory}
-    if set(by_id) != inventory_ids:
-        missing = sorted(inventory_ids - set(by_id))
+    inventory_by_id = {str(marker["id"]): marker for marker in inventory}
+    inventory_ids = set(inventory_by_id)
+    triage_ids = {str(marker["id"]) for marker in markers_for_triage(inventory)}
+    if not triage_ids.issubset(by_id) or not set(by_id).issubset(inventory_ids):
+        missing = sorted(triage_ids - set(by_id))
         extra = sorted(set(by_id) - inventory_ids)
         raise SystemExit(f"decisions.jsonl не совпадает с inventory: missing={missing[:5]}, extra={extra[:5]}")
     counts = Counter()
-    inventory_by_id = {str(marker["id"]): marker for marker in inventory}
     for decision in decisions:
-        marker = inventory_by_id[str(decision["marker_id"])]
+        marker_id = str(decision["marker_id"])
+        marker = inventory_by_id[marker_id]
         if any(decision.get(key) != marker.get(key) for key in ("warnClass", "file", "line")):
             raise SystemExit("Метаданные решения не совпадают с инвентарём")
+        if marker_id not in triage_ids:
+            continue
         verdict = decision.get("verdict")
         if verdict is not None and (not isinstance(verdict, str) or verdict not in VALID_VERDICTS):
             raise SystemExit("Недопустимый verdict в очереди; запись не считается Pending")
@@ -97,10 +123,13 @@ def state(inventory: list[dict], decisions: list[dict]) -> tuple[dict[str, dict]
 
 def progress_payload(inventory: list[dict], decisions: list[dict]) -> dict:
     _, counts = state(inventory, decisions)
+    triage_total = len(markers_for_triage(inventory))
     pending = counts.get("Pending", 0)
     return {
-        "total": len(inventory),
-        "completed": len(inventory) - pending,
+        "inventory_total": len(inventory),
+        "already_reviewed": len(inventory) - triage_total,
+        "total": triage_total,
+        "completed": triage_total - pending,
         "pending": pending,
         "by_verdict": {name: counts.get(name, 0) for name in sorted(VALID_VERDICTS)},
     }
@@ -112,7 +141,7 @@ def next_parallel_batch(
     by_id, _ = state(inventory, decisions)
     pending = [
         marker
-        for marker in inventory
+        for marker in markers_for_triage(inventory)
         if by_id[str(marker["id"])].get("verdict") not in VALID_VERDICTS
     ]
     payload = progress_payload(inventory, decisions)
@@ -385,7 +414,8 @@ def validate_worker_result(result: dict, current: dict) -> list[str]:
 
 
 def apply_worker_results(
-    decisions: list[dict], result_paths: list[Path], allowed_ids: list[str], path: Path
+    decisions: list[dict], result_paths: list[Path], allowed_ids: list[str], path: Path,
+    triage_ids: set[str],
 ) -> dict:
     results = load_worker_results(result_paths)
     requested = set(allowed_ids)
@@ -403,6 +433,9 @@ def apply_worker_results(
     unknown = sorted(requested - set(by_id))
     if unknown:
         raise SystemExit(f"Неизвестные marker_id: {unknown}")
+    excluded = sorted(requested - triage_ids)
+    if excluded:
+        raise SystemExit(f"Маркеры уже размечены в Svacer и исключены из доразметки: {excluded}")
     errors: list[str] = []
     for result in results:
         marker_id = str(result["marker_id"])
@@ -420,12 +453,15 @@ def apply_worker_results(
     return {"applied": sorted(result_by_id), "count": len(result_by_id)}
 
 
-def reopen(decisions: list[dict], ids: list[str], path: Path) -> dict:
+def reopen(decisions: list[dict], ids: list[str], path: Path, triage_ids: set[str]) -> dict:
     requested = set(ids)
     known = {str(item.get("marker_id")) for item in decisions}
     unknown = sorted(requested - known)
     if unknown:
         raise SystemExit(f"Неизвестные marker_id: {unknown}")
+    excluded = sorted(requested - triage_ids)
+    if excluded:
+        raise SystemExit(f"Маркеры уже размечены в Svacer и не входят в локальную очередь: {excluded}")
     for item in decisions:
         if str(item.get("marker_id")) not in requested:
             continue
@@ -489,6 +525,7 @@ def main() -> int:
             # results since the initial read. Never overwrite with a stale copy.
             decisions = load_decisions(decisions_path)
             state(inventory, decisions)
+            triage_ids = {str(marker["id"]) for marker in markers_for_triage(inventory)}
             if args.action == "apply":
                 result_paths = [Path(name).expanduser().resolve() for name in args.results]
                 result = apply_worker_results(
@@ -496,10 +533,11 @@ def main() -> int:
                     result_paths,
                     args.allowed_ids,
                     decisions_path,
+                    triage_ids,
                 )
                 record_saved_workers(decisions_path, result_paths)
             else:
-                result = reopen(decisions, args.ids, decisions_path)
+                result = reopen(decisions, args.ids, decisions_path, triage_ids)
 
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0

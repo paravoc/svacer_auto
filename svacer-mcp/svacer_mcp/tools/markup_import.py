@@ -223,19 +223,48 @@ def _validate_inventory(value: dict) -> tuple[list[dict], dict[str, dict]]:
     return markers, by_id
 
 
+def _marker_review_status(marker: dict) -> str:
+    review = marker.get("review")
+    if review is None:
+        return "Undecided"
+    if isinstance(review, dict):
+        status = review.get("status")
+    elif isinstance(review, str):
+        status = review
+    else:
+        raise ValueError("Inventory contains an invalid review field")
+    normalized = str(status or "").strip()
+    if not normalized or normalized.casefold() == "undecided":
+        return "Undecided"
+    return normalized
+
+
+def _triage_inventory(inventory: dict[str, dict]) -> dict[str, dict]:
+    return {
+        marker_id: marker
+        for marker_id, marker in inventory.items()
+        if _marker_review_status(marker) == "Undecided"
+    }
+
+
 def _validate_decisions(rows: list[dict], inventory: dict[str, dict]) -> dict[str, dict]:
+    all_rows: dict[str, dict] = {}
+    target_inventory = _triage_inventory(inventory)
     by_id: dict[str, dict] = {}
     errors: list[str] = []
     for row in rows:
         marker_id = str(row.get("marker_id") or "")
-        if not marker_id or marker_id in by_id:
+        if not marker_id or marker_id in all_rows:
             errors.append(f"empty or duplicate marker_id: {marker_id!r}")
             continue
-        by_id[marker_id] = row
+        all_rows[marker_id] = row
         marker = inventory.get(marker_id)
         if marker is None:
             errors.append(f"unknown marker_id: {marker_id}")
             continue
+        if marker_id not in target_inventory:
+            continue
+        by_id[marker_id] = row
         for name in ("warnClass", "file", "line"):
             if row.get(name) != marker.get(name):
                 errors.append(f"{marker_id}: {name} does not match the inventory")
@@ -266,12 +295,9 @@ def _validate_decisions(rows: list[dict], inventory: dict[str, dict]) -> dict[st
                 errors.append(f"{marker_id}: Confirmed requires action")
         elif "severity" in row or "action" in row:
             errors.append(f"{marker_id}: {verdict} must not contain severity/action")
-    missing = sorted(set(inventory) - set(by_id))
-    extra = sorted(set(by_id) - set(inventory))
+    missing = sorted(set(target_inventory) - set(by_id))
     if missing:
         errors.append(f"missing decisions: {missing[:10]}")
-    if extra:
-        errors.append(f"extra decisions: {extra[:10]}")
     if errors:
         raise ValueError("Decisions validation failed:\n- " + "\n- ".join(errors[:100]))
     return by_id
@@ -497,6 +523,9 @@ async def prepare_markup_import(
                 "automatic re-preparation is blocked to prevent duplicate comments."
             )
         job, markers, inventory, decisions = _load_bundle(root, job_path)
+        if not decisions:
+            raise ValueError("No undecided ГОСТ markers require import")
+        target_markers = [marker for marker in markers if str(marker["id"]) in decisions]
         marker_invariants = await _fresh_marker_invariants(api_client, job, inventory)
         exported_content = await api_client.export_markup(
             job["branch_id"], job["snapshot_id"], include_comments=False
@@ -508,7 +537,7 @@ async def prepare_markup_import(
         )
         import_content, differences = _build_import(
             job,
-            markers,
+            target_markers,
             decisions,
             marker_invariants,
             exported_rows,
@@ -526,7 +555,9 @@ async def prepare_markup_import(
             "branch_id": job["branch_id"],
             "snapshot_id": job["snapshot_id"],
             "advanced_filter": GOST_FILTER,
-            "marker_count": len(markers),
+            "inventory_marker_count": len(markers),
+            "already_reviewed_count": len(markers) - len(target_markers),
+            "marker_count": len(target_markers),
             "by_verdict": dict(sorted(counts.items())),
             "import_file": import_path.name,
             "sha256": digest,
@@ -543,7 +574,9 @@ async def prepare_markup_import(
         return json.dumps({
             "prepared": True,
             "remote_changed": False,
-            "marker_count": len(markers),
+            "inventory_marker_count": len(markers),
+            "already_reviewed_count": len(markers) - len(target_markers),
+            "marker_count": len(target_markers),
             "by_verdict": dict(sorted(counts.items())),
             "conflict_count": len(differences),
             "requires_force": bool(differences),
@@ -584,6 +617,7 @@ async def apply_markup_import(
                 "svacer-import-result.json and Svacer; automatic repeat is blocked."
             )
         job, markers, inventory, decisions = _load_bundle(root, job_path)
+        target_markers = [marker for marker in markers if str(marker["id"]) in decisions]
         preview = _read_json(job_path / "svacer-import-preview.json")
         import_path = job_path / "svacer-import.jsonl"
         try:
@@ -600,7 +634,11 @@ async def apply_markup_import(
         for name in ("project_id", "branch_id", "snapshot_id"):
             if preview.get(name) != job[name]:
                 raise ValueError(f"Preview {name} does not match job.json")
-        if preview.get("advanced_filter") != GOST_FILTER or preview.get("marker_count") != len(markers):
+        if (
+            preview.get("advanced_filter") != GOST_FILTER
+            or preview.get("inventory_marker_count") != len(markers)
+            or preview.get("marker_count") != len(target_markers)
+        ):
             raise ValueError("Preview scope is invalid")
         expected_confirmation = (
             preview.get("force_confirmation") if overwrite == "force" else preview.get("confirmation")
@@ -624,7 +662,7 @@ async def apply_markup_import(
             "snapshot_id": job["snapshot_id"],
             "sha256": digest,
             "overwrite": overwrite,
-            "marker_count": len(markers),
+            "marker_count": len(target_markers),
         }
         _atomic_json(attempt_path, attempt)
         try:
@@ -650,12 +688,12 @@ async def apply_markup_import(
             )
             readback = _rows_by_invariant(
                 _parse_markup(readback_content, source="Svacer read-back export"),
-                set(marker_invariants.values()),
+                {marker_invariants[str(marker["id"])] for marker in target_markers},
                 source="Svacer read-back export",
             )
             status_mismatches: list[str] = []
             comment_mismatches: list[str] = []
-            for marker in markers:
+            for marker in target_markers:
                 marker_id = str(marker["id"])
                 decision = decisions[marker_id]
                 row = readback[marker_invariants[marker_id]]
@@ -669,7 +707,7 @@ async def apply_markup_import(
                 "verified": not status_mismatches and not comment_mismatches,
                 "status_mismatches": status_mismatches,
                 "comment_mismatches": comment_mismatches,
-                "checked": len(markers),
+                "checked": len(target_markers),
             }
         except Exception as exc:
             verification = {

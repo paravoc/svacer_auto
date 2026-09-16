@@ -7,7 +7,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from triage_queue import load_inventory
+from triage_queue import load_inventory, markers_for_triage
 
 
 def main() -> int:
@@ -28,7 +28,8 @@ def main() -> int:
     if output.exists() and not args.force:
         raise SystemExit(f"Файл уже существует: {output}")
 
-    markers = load_inventory(inventory)
+    all_markers = load_inventory(inventory)
+    markers = markers_for_triage(all_markers)
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w" if args.force else "x", encoding="utf-8", newline="\n") as stream:
         for marker in markers:
@@ -58,7 +59,9 @@ def main() -> int:
             stream.write("\n")
 
     print(f"Шаблон: {output}")
-    print(f"Маркеров: {len(markers)}")
+    print(f"ГОСТ-маркеров всего: {len(all_markers)}")
+    print(f"Уже размечено в Svacer: {len(all_markers) - len(markers)}")
+    print(f"Для доразметки: {len(markers)}")
     return 0
 
 

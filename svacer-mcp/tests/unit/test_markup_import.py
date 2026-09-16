@@ -187,6 +187,35 @@ async def test_prepare_is_read_only_and_builds_statuses_comments(monkeypatch, tm
 
 
 @pytest.mark.asyncio
+async def test_prepare_imports_only_undecided_inventory_markers(monkeypatch, tmp_path):
+    root, job, export_rows = make_job(tmp_path)
+    inventory = json.loads((job / "markers.inventory.json").read_text())
+    inventory["markers"][0]["review"] = {
+        "status": "False Positive",
+        "severity": "Unspecified",
+        "action": "Undecided",
+    }
+    inventory["markers"][1]["review"] = None
+    (job / "markers.inventory.json").write_text(json.dumps(inventory), encoding="utf-8")
+    monkeypatch.setenv("SVACER_TRIAGE_ROOT", str(root))
+    api = FakeAPI(export_rows)
+
+    prepared = json.loads(await prepare_markup_import(str(job), context(api)))
+
+    assert prepared["inventory_marker_count"] == 2
+    assert prepared["already_reviewed_count"] == 1
+    assert prepared["marker_count"] == 1
+    rows = [json.loads(line) for line in (job / "svacer-import.jsonl").read_text().splitlines()]
+    assert [row["invariant"] for row in rows] == ["inv-2"]
+
+    applied = json.loads(await apply_markup_import(
+        str(job), prepared["confirmation"], context(api), overwrite="none"
+    ))
+    assert applied["status"] == "completed_verified"
+    assert applied["verification"]["checked"] == 1
+
+
+@pytest.mark.asyncio
 async def test_conflict_requires_force_then_imports_and_verifies(monkeypatch, tmp_path):
     root, job, export_rows = make_job(tmp_path, conflict=True)
     monkeypatch.setenv("SVACER_TRIAGE_ROOT", str(root))
