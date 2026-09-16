@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 
 $port = 8002
 $serverScript = (Join-Path $PSScriptRoot "start_svacer_http.py")
