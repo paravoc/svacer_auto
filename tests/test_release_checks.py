@@ -183,3 +183,20 @@ def test_powershell_encoding_and_occupied_port(tmp_path):
                        "& $Script\nexit $LASTEXITCODE\n", encoding="utf-8-sig")
     checked = powershell(wrapper, "-Script", str(ROOT / "start_svacer_http.ps1"))
     assert checked.returncode == 3, checked.stderr.decode(errors="replace")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows PowerShell 5.1")
+def test_stop_analyze_pauses_all_local_jobs(tmp_path):
+    tool = tmp_path / "tool"
+    job = tool / "RESULTS" / "job-1"
+    job.mkdir(parents=True)
+    (job / "job.json").write_text("{}", encoding="utf-8")
+    script = tool / "stop_components.ps1"
+    script.write_bytes((ROOT / "stop_components.ps1").read_bytes())
+
+    stopped = powershell(script, "-Mode", "Analyze")
+
+    assert stopped.returncode == 0, stopped.stderr.decode(errors="replace")
+    control = json.loads((job / "control.json").read_text(encoding="utf-8-sig"))
+    assert control["pause_requested"] is True
+    assert control["source"] == "STOP ANALYZE.cmd"

@@ -1,19 +1,16 @@
 ﻿$ErrorActionPreference = "Stop"
 
 $port = 8002
-$serverScript = (Join-Path $PSScriptRoot "start_svacer_http.py")
-$launcher = Join-Path $PSScriptRoot "start_svacer_http.cmd"
+$stopScript = Join-Path $PSScriptRoot "stop_components.ps1"
 
 try {
     $listeners = @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)
-    foreach ($listener in $listeners) {
-        $process = Get-CimInstance Win32_Process -Filter "ProcessId = $($listener.OwningProcess)"
-        $commandLine = [string]$process.CommandLine
-        if ($commandLine -notlike "*$serverScript*") {
-            throw "Порт $port занят другой программой (PID $($listener.OwningProcess)). Она не была остановлена."
+    if ($listeners.Count -gt 0) {
+        Write-Host "Порт $port занят старым MCP. Выполняется автоматическая остановка..." -ForegroundColor Yellow
+        & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $stopScript -Mode Svacer
+        if ($LASTEXITCODE -ne 0) {
+            throw "Не удалось автоматически освободить порт $port. Используй STOP SVACER.cmd."
         }
-        Write-Host "Останавливается прежний локальный MCP..." -ForegroundColor Yellow
-        Stop-Process -Id $listener.OwningProcess -Force
     }
 
     $deadline = [DateTime]::UtcNow.AddSeconds(8)

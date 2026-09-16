@@ -6,6 +6,7 @@ $rootFiles = @(
     'new_triage_job.ps1', 'new_triage_job.cmd',
     'setup_mcp.ps1', 'setup_mcp.cmd', 'start_svacer_http.ps1', 'start_svacer_http.py',
     'start_svacer_http.cmd', 'restart_svacer_http.ps1', 'restart_svacer_http.cmd',
+    'stop_components.ps1', 'STOP SVACER.cmd', 'STOP ANALYZE.cmd', 'STOP ALL.cmd',
     'triage_dashboard.py', 'triage_dashboard.ps1',
     'triage_dashboard.cmd', 'make_portable_package.ps1', 'make_portable_package.cmd',
     'triage_queue.py', 'make_mcp_decisions_template.py', 'validate_mcp_decisions.py',
