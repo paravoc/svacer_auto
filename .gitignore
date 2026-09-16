@@ -1,0 +1,19 @@
+# Local runtime state and credentials
+.venv/
+jobs/
+RESULTS/
+ARCHIVE/
+svacer-http.log
+svacer-mcp/.env
+
+# Python generated files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+svacer-mcp/*.egg-info/
+
+# Local editor files
+.idea/
+.vscode/
+*.swp
+*~

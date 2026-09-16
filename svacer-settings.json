@@ -1,0 +1,8 @@
+{
+  "svacer_url": "http://svacer01.sec.dev.rvision.local:8080",
+  "mcp_url": "http://127.0.0.1:8002/mcp",
+  "filter_name": "ГОСТ 71207-2024",
+  "advanced_filter": "filter(markers, \"ГОСТ 71207-2024\" in .checker_labels)",
+  "parallel_workers": 3,
+  "batch_size": 15
+}

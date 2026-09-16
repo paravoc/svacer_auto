@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""Validate completeness and Svacer field rules for MCP triage decisions."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from collections import Counter
+from pathlib import Path
+from triage_queue import load_inventory, validate_worker_result
+
+
+def read_jsonl(path: Path) -> list[dict]:
+    result = []
+    with path.open("r", encoding="utf-8-sig") as stream:
+        for line_number, line in enumerate(stream, 1):
+            if not line.strip():
+                continue
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise SystemExit(f"Ошибка JSONL, строка {line_number}: {exc}") from exc
+            if not isinstance(value, dict):
+                raise SystemExit(f"Строка {line_number}: ожидался JSON-объект")
+            result.append(value)
+    return result
+
+
+def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--inventory", required=True)
+    parser.add_argument("--decisions", required=True)
+    args = parser.parse_args()
+
+    inventory = {str(marker["id"]): marker for marker in load_inventory(
+        Path(args.inventory).expanduser().resolve()
+    )}
+    decisions = read_jsonl(Path(args.decisions).expanduser().resolve())
+    seen: Counter[str] = Counter()
+    errors: list[str] = []
+
+    for decision in decisions:
+        marker_id = str(decision.get("marker_id") or "")
+        seen[marker_id] += 1
+        if marker_id not in inventory:
+            errors.append(f"неизвестный marker_id: {marker_id}")
+            continue
+        marker = inventory[marker_id]
+        errors.extend(validate_worker_result(decision, marker))
+
+    for marker_id in inventory:
+        if seen[marker_id] == 0:
+            errors.append(f"отсутствует решение: {marker_id}")
+        elif seen[marker_id] > 1:
+            errors.append(f"дубликат решения: {marker_id}")
+
+    print(f"Маркеров: {len(inventory)}")
+    print(f"Решений: {len(decisions)}")
+    if errors:
+        print(f"Ошибок: {len(errors)}")
+        for error in errors[:200]:
+            print(f"- {error}")
+        return 2
+
+    print("Проверка пройдена")
+    for verdict, count in sorted(Counter(item["verdict"] for item in decisions).items()):
+        print(f"{verdict}: {count}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

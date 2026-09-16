@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.cursor/
+.continue/
+.claude/
+
+# Config
+.env
+*.log
+
+# macOS
+.DS_Store
+
+# Egg info
+*.egg-info/
+
+
+
+
+CLAUDE.md
+REVIEW.md
+api-usage-examples/
+.venv
+swagger.yaml
+scripts/

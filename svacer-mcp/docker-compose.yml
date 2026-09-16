@@ -1,0 +1,18 @@
+services:
+  svacer-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - SVACER_TRANSPORT=${SVACER_TRANSPORT:-http}
+      - SVACER_URL=${SVACER_URL:-https://svacer-demo.ispras.ru}
+      - SVACER_LOGIN=${SVACER_LOGIN:-admin}
+      - SVACER_PASSWORD=${SVACER_PASSWORD:-admin}
+      - SVACER_MCP_TOKEN=${SVACER_MCP_TOKEN}
+      - SVACER_MCP_RESOURCE_URL=${SVACER_MCP_RESOURCE_URL:-}
+      - MCP_ENABLE_DNS_REBINDING_PROTECTION=${MCP_ENABLE_DNS_REBINDING_PROTECTION:-true}
+      - MCP_ALLOWED_HOSTS=${MCP_ALLOWED_HOSTS:-}
+      - MCP_ALLOWED_ORIGINS=${MCP_ALLOWED_ORIGINS:-}
+    ports:
+      - "${MCP_PORT:-8002}:8000"
+    restart: unless-stopped

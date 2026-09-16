@@ -1,0 +1,617 @@
+#!/usr/bin/env python3
+"""Lightweight Windows console dashboard for one Svacer triage job."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from collections import Counter, defaultdict
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+
+VALID_VERDICTS = {"Confirmed", "False Positive", "Won't fix", "Unclear"}
+NOTE_RE = re.compile(r"^batch-(\d+)-worker-(\d+)\.json$", re.IGNORECASE)
+ANSI = {
+    "reset": "\033[0m",
+    "bold": "\033[1m",
+    "dim": "\033[2m",
+    "red": "\033[31m",
+    "green": "\033[32m",
+    "yellow": "\033[33m",
+    "blue": "\033[34m",
+    "magenta": "\033[35m",
+    "cyan": "\033[36m",
+    "gray": "\033[90m",
+}
+_LAST_FRAME: str | None = None
+_LAST_FRAME_LINES = 0
+_VT_ENABLED = False
+
+
+def read_json(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8-sig"))
+
+
+def read_jsonl(path: Path) -> list[dict]:
+    rows: list[dict] = []
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
+        if line.strip():
+            value = json.loads(line)
+            if isinstance(value, dict):
+                rows.append(value)
+    return rows
+
+
+def atomic_json(path: Path, value: dict) -> None:
+    temporary = path.with_name(path.name + ".tmp")
+    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+        json.dump(value, stream, ensure_ascii=False, indent=2)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+
+
+def note_rows(path: Path) -> list[dict]:
+    value = read_json(path)
+    if isinstance(value, dict):
+        value = value.get("decisions")
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def collect_state(job: Path) -> dict:
+    state: dict[str, Any] = {
+        "job": job.name,
+        "job_path": str(job),
+        "total": 0,
+        "completed": 0,
+        "pending": 0,
+        "by_verdict": Counter(),
+        "workers": {},
+        "queue": None,
+        "paused": False,
+        "import": "not prepared",
+        "preview": None,
+        "errors": [],
+    }
+    inventory_path = job / "markers.inventory.json"
+    decisions_path = job / "decisions.jsonl"
+    try:
+        if inventory_path.exists():
+            inventory = read_json(inventory_path)
+            markers = inventory.get("markers") if isinstance(inventory, dict) else None
+            state["total"] = len(markers) if isinstance(markers, list) else 0
+        if decisions_path.exists():
+            decisions = read_jsonl(decisions_path)
+            state["by_verdict"] = Counter(
+                row.get("verdict") for row in decisions if row.get("verdict") in VALID_VERDICTS
+            )
+            state["completed"] = sum(state["by_verdict"].values())
+        state["pending"] = max(0, state["total"] - state["completed"])
+    except (OSError, json.JSONDecodeError) as exc:
+        state["errors"].append(f"inventory/decisions: {exc}")
+
+    worker_saved: dict[int, set[str]] = defaultdict(set)
+    worker_batches: dict[int, set[int]] = defaultdict(set)
+    worker_updated: dict[int, float] = defaultdict(float)
+    notes = job / "notes"
+    if notes.is_dir():
+        for path in notes.iterdir():
+            match = NOTE_RE.match(path.name)
+            if not match:
+                continue
+            batch, worker = int(match.group(1)), int(match.group(2))
+            try:
+                for row in note_rows(path):
+                    marker_id = str(row.get("marker_id") or "")
+                    if marker_id:
+                        worker_saved[worker].add(marker_id)
+                worker_batches[worker].add(batch)
+                worker_updated[worker] = max(worker_updated[worker], path.stat().st_mtime)
+            except (OSError, json.JSONDecodeError) as exc:
+                state["errors"].append(f"{path.name}: {exc}")
+
+    current_by_worker: dict[int, dict] = {}
+    status_path = job / "workers.status.json"
+    if status_path.exists():
+        try:
+            queue = read_json(status_path)
+            if isinstance(queue, dict):
+                state["queue"] = queue
+                for worker in queue.get("workers") or []:
+                    if isinstance(worker, dict) and type(worker.get("worker")) is int:
+                        current_by_worker[worker["worker"]] = worker
+        except (OSError, json.JSONDecodeError) as exc:
+            state["errors"].append(f"workers.status.json: {exc}")
+
+    for worker in sorted(set(worker_saved) | set(current_by_worker)):
+        current = current_by_worker.get(worker, {})
+        state["workers"][worker] = {
+            "saved": len(worker_saved[worker]),
+            "batches": len(worker_batches[worker]),
+            "updated": worker_updated[worker],
+            "current_status": current.get("status", "idle"),
+            "assigned": int(current.get("assigned") or 0),
+            "current_saved": int(current.get("saved") or 0),
+        }
+
+    control_path = job / "control.json"
+    if control_path.exists():
+        try:
+            control = read_json(control_path)
+            state["paused"] = bool(control.get("pause_requested")) if isinstance(control, dict) else False
+        except (OSError, json.JSONDecodeError) as exc:
+            state["errors"].append(f"control.json: {exc}")
+
+    attempt_path = job / "svacer-import-attempt.json"
+    preview_path = job / "svacer-import-preview.json"
+    if attempt_path.exists():
+        try:
+            attempt = read_json(attempt_path)
+            state["import"] = str(attempt.get("status") or "attempt recorded")
+        except (OSError, json.JSONDecodeError):
+            state["import"] = "attempt file is invalid"
+    elif preview_path.exists():
+        try:
+            state["preview"] = read_json(preview_path)
+            state["import"] = "prepared; waiting for confirmation"
+        except (OSError, json.JSONDecodeError):
+            state["import"] = "preview is invalid"
+    return state
+
+
+def format_time(timestamp: float) -> str:
+    return datetime.fromtimestamp(timestamp).strftime("%H:%M:%S") if timestamp else "-"
+
+
+def progress_bar(completed: int, total: int, width: int = 34) -> str:
+    ratio = completed / total if total else 0.0
+    filled = min(width, max(0, round(width * ratio)))
+    return "█" * filled + "░" * (width - filled)
+
+
+def paint(text: str, color: str, enabled: bool) -> str:
+    return f"{ANSI[color]}{text}{ANSI['reset']}" if enabled else text
+
+
+def render(
+    state: dict,
+    message: str = "",
+    mcp_status: str = "не проверялся",
+    *,
+    use_color: bool = False,
+) -> str:
+    total, completed = state["total"], state["completed"]
+    percent = (100 * completed / total) if total else 0.0
+    confirmed = state["by_verdict"].get("Confirmed", 0)
+    false_positive = state["by_verdict"].get("False Positive", 0)
+    wont_fix = state["by_verdict"].get("Won't fix", 0)
+    unclear = state["by_verdict"].get("Unclear", 0)
+    pending = state["pending"]
+    bar_color = "green" if total and completed == total else "blue"
+    queue_text = "ПАУЗА после текущей партии" if state["paused"] else "работа разрешена"
+    queue_color = "yellow" if state["paused"] else "green"
+    import_color = (
+        "green" if state["import"] == "completed_verified"
+        else "red" if "unknown" in state["import"] or "unverified" in state["import"] or "invalid" in state["import"]
+        else "cyan" if state["import"] != "not prepared"
+        else "gray"
+    )
+    lines = [
+        paint("SVACER ГОСТ TRIAGE — локальная панель", "cyan", use_color),
+        paint("=" * 72, "gray", use_color),
+        f"Задача: {state['job']}",
+        f"Результаты: {state['job_path']}",
+        f"MCP: {paint(mcp_status, 'green' if mcp_status == 'подключён' else 'yellow', use_color)}",
+        (
+            "Прогресс: "
+            f"[{paint(progress_bar(completed, total), bar_color, use_color)}] "
+            f"{paint(f'{completed}/{total} ({percent:.1f}%)', bar_color, use_color)}"
+        ),
+        (
+            "Вердикты: "
+            f"{paint(f'Confirmed {confirmed}', 'red', use_color)} | "
+            f"{paint(f'FP {false_positive}', 'green', use_color)} | "
+            f"{paint(f'Wont fix {wont_fix}', 'yellow', use_color)} | "
+            f"{paint(f'Unclear {unclear}', 'magenta', use_color)} | "
+            f"{paint(f'Pending {pending}', 'gray', use_color)}"
+        ),
+        f"Очередь: {paint(queue_text, queue_color, use_color)}",
+    ]
+    queue = state.get("queue") or {}
+    if state["workers"] or queue:
+        lines.extend([
+            "",
+            paint("Работники:", "bold", use_color),
+            "  №    сохранено   партий   текущая партия            последний файл",
+        ])
+        for number, worker in state["workers"].items():
+            current = f"{worker['current_status']}: {worker['current_saved']}/{worker['assigned']}"
+            lines.append(
+                f"  {number:<4} {worker['saved']:<11} {worker['batches']:<7} "
+                f"{current:<24} {format_time(worker['updated'])}"
+            )
+    if queue:
+        lines.append(f"Текущая партия: {queue.get('batch') or '-'}; состояние: {queue.get('state') or '-'}")
+    lines.extend(["", f"Импорт: {paint(state['import'], import_color, use_color)}"])
+    preview = state.get("preview")
+    if isinstance(preview, dict):
+        lines.append(
+            f"  маркеров {preview.get('marker_count', 0)}, конфликтов {preview.get('conflict_count', 0)}, "
+            f"режим {'force' if preview.get('requires_force') else 'none'}"
+        )
+        phrase = preview.get("force_confirmation") if preview.get("requires_force") else preview.get("confirmation")
+        lines.append(f"  подтверждение: {phrase}")
+    if state["errors"]:
+        lines.extend(
+            ["", paint("Ошибки чтения:", "red", use_color)]
+            + [paint(f"  - {error}", "red", use_color) for error in state["errors"][:5]]
+        )
+    if message:
+        message_color = "red" if any(word in message.lower() for word in ("ошиб", "не выполн", "не подтверж")) else "cyan"
+        lines.extend(["", f"Сообщение: {paint(message, message_color, use_color)}"])
+    lines.extend([
+        "",
+        (
+            f"{paint('[P]', 'yellow', use_color)} приостановить после партии   "
+            f"{paint('[C]', 'green', use_color)} разрешить продолжение"
+        ),
+        (
+            f"{paint('[I]', 'cyan', use_color)} проверить и подготовить      "
+            f"{paint('[S]', 'red', use_color)} отправить результаты"
+        ),
+        (
+            f"{paint('[O]', 'blue', use_color)} открыть папку                "
+            f"{paint('[M]', 'magenta', use_color)} подключить Svacer"
+        ),
+        (
+            f"{paint('[R]', 'blue', use_color)} обновить                     "
+            f"{paint('[Q]', 'gray', use_color)} закрыть панель"
+        ),
+        "",
+        "Пауза не обрывает уже работающего агента. После C при необходимости напишите",
+        "в задаче Codex «продолжи»: панель не может сама разбудить остановленную задачу.",
+    ])
+    return "\n".join(lines)
+
+
+def set_pause(job: Path, paused: bool) -> None:
+    atomic_json(job / "control.json", {
+        "pause_requested": paused,
+        "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    })
+
+
+def mcp_text(result: Any) -> str:
+    texts = [block.text for block in getattr(result, "content", []) if hasattr(block, "text")]
+    text = "\n".join(texts).strip()
+    if getattr(result, "isError", False):
+        raise RuntimeError(text or "MCP tool returned an error")
+    if not text:
+        raise RuntimeError("MCP tool returned no text result")
+    return text
+
+
+async def call_mcp_tool(mcp_url: str, token: str, tool: str, arguments: dict) -> str:
+    import httpx
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    headers = {"Authorization": f"Bearer {token}"}
+    timeout = httpx.Timeout(connect=5.0, read=180.0, write=30.0, pool=5.0)
+    async with httpx.AsyncClient(headers=headers, timeout=timeout) as client:
+        async with streamable_http_client(mcp_url, http_client=client) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                return mcp_text(await session.call_tool(tool, arguments=arguments))
+
+
+async def list_mcp_tools(mcp_url: str, token: str) -> set[str]:
+    import httpx
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    headers = {"Authorization": f"Bearer {token}"}
+    timeout = httpx.Timeout(connect=3.0, read=10.0, write=10.0, pool=3.0)
+    async with httpx.AsyncClient(headers=headers, timeout=timeout) as client:
+        async with streamable_http_client(mcp_url, http_client=client) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                response = await session.list_tools()
+                return {tool.name for tool in response.tools}
+
+
+def describe_exception(exc: BaseException) -> str:
+    """Return useful leaf errors instead of AnyIO's generic TaskGroup wrapper."""
+    messages: list[str] = []
+    seen: set[int] = set()
+
+    def visit(value: BaseException | None) -> None:
+        if value is None or id(value) in seen:
+            return
+        seen.add(id(value))
+        nested = getattr(value, "exceptions", None)
+        if isinstance(nested, (list, tuple)) and nested:
+            for item in nested:
+                if isinstance(item, BaseException):
+                    visit(item)
+            return
+        text = str(value).strip()
+        if text and "unhandled errors in a TaskGroup" not in text:
+            messages.append(f"{type(value).__name__}: {text}")
+        cause = value.__cause__ or value.__context__
+        if isinstance(cause, BaseException):
+            visit(cause)
+
+    visit(exc)
+    unique = list(dict.fromkeys(messages))
+    return " | ".join(unique[:4]) or f"{type(exc).__name__}: {exc}"
+
+
+def friendly_mcp_error(exc: BaseException) -> str:
+    detail = describe_exception(exc)
+    lowered = detail.lower()
+    if "method not found" in lowered or "unknown tool" in lowered or "prepare_markup_import" in lowered:
+        return "Запущена старая версия MCP. Нажмите M, войдите в Svacer и затем нажмите R."
+    if any(text in lowered for text in ("connecterror", "connection refused", "all connection attempts failed")):
+        return "MCP не запущен. Нажмите M, войдите в Svacer и затем нажмите R."
+    if "401" in lowered or "unauthorized" in lowered:
+        return "Локальная авторизация MCP устарела. Нажмите M и войдите в Svacer заново."
+    return detail
+
+
+def check_mcp(mcp_url: str, token: str) -> str:
+    if not token:
+        return "не настроен — запустите START.cmd"
+    try:
+        names = asyncio.run(list_mcp_tools(mcp_url, token))
+    except Exception as exc:
+        return friendly_mcp_error(exc)
+    required = {"prepare_markup_import", "apply_markup_import"}
+    if not required.issubset(names):
+        return "запущена старая версия — нажмите M"
+    return "подключён"
+
+
+def start_svacer_reconnect(root: Path) -> None:
+    script = root / "restart_svacer_http.ps1"
+    if not script.exists():
+        raise FileNotFoundError(f"Не найден {script.name}")
+    subprocess.Popen(
+        [
+            "powershell.exe", "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", str(script),
+        ],
+        cwd=str(root),
+        creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+    )
+
+
+def resolve_job(root: Path, value: str | None) -> Path:
+    result_roots = [path.resolve() for path in (root / "RESULTS", root / "jobs") if path.is_dir()]
+    if not result_roots:
+        raise SystemExit("Папка RESULTS ещё не создана")
+    if value:
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        candidate = candidate.resolve(strict=True)
+    else:
+        candidates = [path for directory in result_roots for path in directory.iterdir() if path.is_dir()]
+        if not candidates:
+            raise SystemExit("В каталоге RESULTS ещё нет задач")
+        candidate = max(candidates, key=lambda path: path.stat().st_mtime).resolve()
+    if candidate.parent not in result_roots:
+        raise SystemExit("Разрешена только задача непосредственно из каталога RESULTS")
+    return candidate
+
+
+def enable_virtual_terminal() -> bool:
+    if not sys.stdout.isatty():
+        return False
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        mode = wintypes.DWORD()
+        if handle in (0, -1) or not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return False
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+        return bool(kernel32.SetConsoleMode(handle, mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING))
+    except (AttributeError, OSError):
+        return False
+
+
+def reset_screen() -> None:
+    global _LAST_FRAME, _LAST_FRAME_LINES
+    if _VT_ENABLED:
+        sys.stdout.write("\033[2J\033[H")
+        sys.stdout.flush()
+    elif sys.stdout.isatty() and os.name == "nt":
+        os.system("cls")
+    _LAST_FRAME = None
+    _LAST_FRAME_LINES = 0
+
+
+def display_frame(frame: str, *, force: bool = False) -> None:
+    """Update one dashboard in place and skip unchanged refreshes."""
+    global _LAST_FRAME, _LAST_FRAME_LINES
+    if not force and frame == _LAST_FRAME:
+        return
+    if not sys.stdout.isatty():
+        print(frame, flush=True)
+    elif _VT_ENABLED:
+        lines = frame.splitlines()
+        sys.stdout.write("\033[H")
+        for line in lines:
+            sys.stdout.write("\033[2K" + line + "\n")
+        for _ in range(max(0, _LAST_FRAME_LINES - len(lines))):
+            sys.stdout.write("\033[2K\n")
+        sys.stdout.write("\033[J")
+        sys.stdout.flush()
+        _LAST_FRAME_LINES = len(lines)
+    else:
+        # Old consoles without VT cannot do colored in-place drawing.  Clear
+        # only when content actually changed, not on every one-second tick.
+        os.system("cls")
+        print(frame, flush=True)
+    _LAST_FRAME = frame
+
+
+def read_key(timeout: float = 1.0) -> str | None:
+    if os.name != "nt":
+        time.sleep(timeout)
+        return None
+    import msvcrt
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if msvcrt.kbhit():
+            return msvcrt.getwch().lower()
+        time.sleep(0.05)
+    return None
+
+
+def main() -> int:
+    global _VT_ENABLED
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
+    parser = argparse.ArgumentParser(description="Консольная панель Svacer ГОСТ triage")
+    parser.add_argument("--job")
+    parser.add_argument("--once", action="store_true", help="Показать состояние один раз")
+    args = parser.parse_args()
+    root = Path(__file__).resolve().parent
+    job = resolve_job(root, args.job)
+    settings = read_json(root / "svacer-settings.json")
+    mcp_url = str(settings.get("mcp_url") or "http://127.0.0.1:8002/mcp")
+    token = os.getenv("SVACER_LOCAL_MCP_TOKEN", "")
+    message = ""
+    mcp_status = check_mcp(mcp_url, token)
+    try:
+        _VT_ENABLED = enable_virtual_terminal()
+        reset_screen()
+        while True:
+            state = collect_state(job)
+            display_frame(render(state, message, mcp_status, use_color=_VT_ENABLED))
+            message = ""
+            if args.once:
+                return 0
+            key = read_key()
+            if key is None:
+                continue
+            if key == "q":
+                return 0
+            if key == "r":
+                mcp_status = check_mcp(mcp_url, token)
+                message = "Состояние обновлено."
+                continue
+            if key == "p":
+                set_pause(job, True)
+                message = "Пауза запрошена: новая партия больше не будет выдана."
+            elif key == "c":
+                set_pause(job, False)
+                message = "Продолжение разрешено. Если Codex уже остановился, напишите ему «продолжи»."
+            elif key == "o":
+                os.startfile(job)
+                message = "Папка задачи открыта."
+            elif key == "m":
+                try:
+                    start_svacer_reconnect(root)
+                    mcp_status = "ожидается вход"
+                    message = "Открыто окно входа в Svacer. После успешного запуска нажмите R."
+                except Exception as exc:
+                    mcp_status = "ошибка запуска"
+                    message = f"Не удалось открыть подключение: {describe_exception(exc)}"
+            elif key in {"i", "s"}:
+                if not token:
+                    message = "Нет локального MCP-токена. Запустите setup_mcp.cmd, затем панель заново."
+                    continue
+                mcp_status = check_mcp(mcp_url, token)
+                if mcp_status != "подключён":
+                    message = "Импорт не запускался: сначала нажмите M, войдите в Svacer, затем нажмите R."
+                    continue
+                if key == "i":
+                    if state["total"] == 0 or state["completed"] != state["total"]:
+                        message = "Импорт можно готовить только после заполнения всех решений."
+                        continue
+                    try:
+                        message = "Проверяю ГОСТ-фильтр, маркеры и текущую разметку Svacer. Подождите..."
+                        display_frame(render(collect_state(job), message, mcp_status, use_color=_VT_ENABLED), force=True)
+                        reply = asyncio.run(call_mcp_tool(
+                            mcp_url, token, "prepare_markup_import", {"job_directory": str(job)}
+                        ))
+                        payload = json.loads(reply)
+                        mcp_status = "подключён"
+                        message = (
+                            f"Файл подготовлен: {payload.get('marker_count')} маркеров, "
+                            f"конфликтов {payload.get('conflict_count')}. Проверьте preview."
+                        )
+                    except Exception as exc:
+                        mcp_status = "ошибка"
+                        message = f"Подготовка не выполнена: {friendly_mcp_error(exc)}"
+                else:
+                    preview_path = job / "svacer-import-preview.json"
+                    if not preview_path.exists():
+                        message = "Сначала нажмите I и проверьте preview."
+                        continue
+                    if (job / "svacer-import-attempt.json").exists():
+                        message = "Попытка импорта уже записана; повторная отправка заблокирована."
+                        continue
+                    try:
+                        preview = read_json(preview_path)
+                        force = bool(preview.get("requires_force"))
+                        expected = preview.get("force_confirmation" if force else "confirmation")
+                        reset_screen()
+                        print("ОТПРАВКА ИЗМЕНИТ РАЗМЕТКУ В SVACER\n")
+                        print(f"Ветка: {preview.get('branch_id')}")
+                        print(f"Маркеров: {preview.get('marker_count')}")
+                        print(f"Конфликтов: {preview.get('conflict_count')}")
+                        print(f"Режим: {'force — существующая разметка будет заменена' if force else 'none'}")
+                        print("\nДля подтверждения введите дословно:")
+                        print(expected)
+                        typed = input("\n> ")
+                        if typed != expected:
+                            message = "Фраза не совпала. Ничего не отправлено."
+                            continue
+                        message = "Отправляю разметку и выполняю обратную проверку. Не закрывайте окно..."
+                        display_frame(render(collect_state(job), message, mcp_status, use_color=_VT_ENABLED), force=True)
+                        reply = asyncio.run(call_mcp_tool(
+                            mcp_url,
+                            token,
+                            "apply_markup_import",
+                            {
+                                "job_directory": str(job),
+                                "confirmation": typed,
+                                "overwrite": "force" if force else "none",
+                            },
+                        ))
+                        payload = json.loads(reply)
+                        mcp_status = "подключён"
+                        verified = bool((payload.get("verification") or {}).get("verified"))
+                        message = (
+                            "Отправка выполнена и проверена обратным экспортом."
+                            if verified else
+                            "Svacer принял запрос, но обратная проверка не прошла. Проверьте result/readback."
+                        )
+                    except Exception as exc:
+                        mcp_status = "ошибка"
+                        message = f"Отправка не подтверждена: {friendly_mcp_error(exc)}"
+    except KeyboardInterrupt:
+        return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
