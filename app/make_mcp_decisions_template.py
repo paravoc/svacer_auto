@@ -34,16 +34,21 @@ def main() -> int:
     with output.open("w" if args.force else "x", encoding="utf-8", newline="\n") as stream:
         for marker in markers:
             record = {
+                "schema_version": 2,
                 "marker_id": marker["id"],
                 "warnClass": marker.get("warnClass"),
                 "file": marker.get("file"),
                 "line": marker.get("line"),
                 "verdict": None,
                 "confidence": None,
+                "entrypoint": "",
                 "source": "",
                 "control": "",
                 "sink": "",
+                "build_reachability": "",
+                "product_reachability": "",
                 "reachable_path": [],
+                "impact": "",
                 "boundary": {
                     "product_surface": "unknown",
                     "source_trust": "unknown",
@@ -54,6 +59,14 @@ def main() -> int:
                 "counterevidence": [],
                 "proof_gaps": [],
                 "comment": "",
+                "verification": {
+                    "status": "not_required",
+                    "verifier_id": None,
+                    "reason": "",
+                    "evidence": [],
+                    "rechecked_paths": [],
+                    "verified_at": None,
+                },
             }
             stream.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
             stream.write("\n")

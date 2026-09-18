@@ -1,9 +1,10 @@
 ﻿$ErrorActionPreference = "Stop"
 
+$toolDirectory = Split-Path -Parent $PSScriptRoot
 $settingsPath = Join-Path $PSScriptRoot "svacer-settings.json"
-$pythonPath = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
+$pythonPath = Join-Path $toolDirectory ".venv\Scripts\python.exe"
 $serverPath = Join-Path $PSScriptRoot "start_svacer_http.py"
-$logPath = Join-Path $PSScriptRoot "svacer-http.log"
+$logPath = Join-Path $toolDirectory "svacer-http.log"
 $port = 8002
 
 trap {
@@ -28,13 +29,13 @@ if (-not (Test-Path -LiteralPath $settingsPath)) {
     throw "Не найден файл настроек: $settingsPath"
 }
 if (-not (Test-Path -LiteralPath $pythonPath)) {
-    throw "Не найдено Python-окружение. Сначала запусти setup_mcp.cmd"
+    throw "Не найдено Python-окружение. Открой START.cmd и выбери пункт 6"
 }
 
 $settings = Get-Content -LiteralPath $settingsPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $localToken = [Environment]::GetEnvironmentVariable("SVACER_LOCAL_MCP_TOKEN", "User")
 if ([string]::IsNullOrWhiteSpace($localToken)) {
-    throw "Не найден локальный MCP-токен. Повтори запуск setup_mcp.cmd"
+    throw "Не найден локальный MCP-токен. Открой START.cmd и выбери пункт 6"
 }
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -109,7 +110,7 @@ $env:SVACER_PASSWORD = $passwordBox.Text
 $env:SVACER_MCP_TOKEN = $localToken
 $env:SVACER_MCP_RESOURCE_URL = "http://127.0.0.1:$port"
 $env:SVACER_HTTP_PORT = [string]$port
-$env:SVACER_TRIAGE_ROOT = $PSScriptRoot
+$env:SVACER_TRIAGE_ROOT = $toolDirectory
 $env:SVACER_TOOLS = "get_projects,get_snapshots,get_warnings,get_markers,get_project_stats,get_project_groups,get_advanced_file_preview,get_diff,prepare_markup_import,apply_markup_import"
 $env:PYTHONUTF8 = "1"
 

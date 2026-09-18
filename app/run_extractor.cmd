@@ -1,8 +1,8 @@
 ﻿@echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-if exist "%~dp0.venv\Scripts\python.exe" (
-  "%~dp0.venv\Scripts\python.exe" "%~dp0extract_gost_markers.py" %*
+if exist "%~dp0..\.venv\Scripts\python.exe" (
+  "%~dp0..\.venv\Scripts\python.exe" "%~dp0extract_gost_markers.py" %*
 ) else (
   python "%~dp0extract_gost_markers.py" %*
 )

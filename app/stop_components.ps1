@@ -8,6 +8,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $mcpPort = 8002
+$toolDirectory = Split-Path -Parent $PSScriptRoot
 
 function Test-IsAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -121,7 +122,7 @@ function Stop-SvacerServer {
 }
 
 function Stop-LocalAnalysis {
-    $resultsRoot = Join-Path $PSScriptRoot "RESULTS"
+    $resultsRoot = Join-Path $toolDirectory "RESULTS"
     $pausedJobs = 0
     if (Test-Path -LiteralPath $resultsRoot) {
         foreach ($job in (Get-ChildItem -LiteralPath $resultsRoot -Directory -ErrorAction SilentlyContinue)) {
@@ -145,7 +146,7 @@ function Stop-LocalAnalysis {
         if ([string]::IsNullOrWhiteSpace($commandLine)) {
             continue
         }
-        $belongsToTool = $commandLine -like "*$PSScriptRoot*"
+        $belongsToTool = $commandLine -like "*$toolDirectory*"
         $isAnalysisProcess = $false
         foreach ($scriptName in $scriptNames) {
             if ($commandLine -like "*$scriptName*") {

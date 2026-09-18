@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import re
 import subprocess
@@ -21,6 +22,7 @@ from triage_queue import markers_for_triage
 
 VALID_VERDICTS = {"Confirmed", "False Positive", "Won't fix", "Unclear"}
 NOTE_RE = re.compile(r"^batch-(\d+)-worker-(\d+)\.json$", re.IGNORECASE)
+VERIFIER_NOTE_RE = re.compile(r"^verify-batch-(\d+)-verifier-(\d+)\.json$", re.IGNORECASE)
 ANSI = {
     "reset": "\033[0m",
     "bold": "\033[1m",
@@ -69,6 +71,41 @@ def note_rows(path: Path) -> list[dict]:
     return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
+def saved_context_metrics(job: Path) -> dict:
+    """Approximate only persisted JSON/text context, never claim account usage."""
+    files: list[Path] = []
+    for name in ("markers.inventory.json", "decisions.jsonl", "job.json", "progress.md"):
+        path = job / name
+        if path.is_file():
+            files.append(path)
+    for directory_name in ("raw", "notes"):
+        directory = job / directory_name
+        if directory.is_dir():
+            files.extend(path for path in directory.rglob("*") if path.is_file())
+    byte_count = 0
+    for path in files:
+        try:
+            byte_count += path.stat().st_size
+        except OSError:
+            continue
+    notes = job / "notes"
+    primary_calls = 0
+    verifier_calls = 0
+    if notes.is_dir():
+        for path in notes.iterdir():
+            if NOTE_RE.match(path.name):
+                primary_calls += 1
+            elif VERIFIER_NOTE_RE.match(path.name):
+                verifier_calls += 1
+    return {
+        "estimated_tokens": math.ceil(byte_count / 4),
+        "bytes": byte_count,
+        "files": len(files),
+        "primary_calls": primary_calls,
+        "verifier_calls": verifier_calls,
+    }
+
+
 def collect_state(job: Path) -> dict:
     state: dict[str, Any] = {
         "job": job.name,
@@ -80,6 +117,11 @@ def collect_state(job: Path) -> dict:
         "pending": 0,
         "by_verdict": Counter(),
         "workers": {},
+        "verifiers": {},
+        "verifier_queue": None,
+        "verification": Counter(),
+        "context": saved_context_metrics(job),
+        "token_warning": 0,
         "queue": None,
         "paused": False,
         "import": "not prepared",
@@ -109,6 +151,15 @@ def collect_state(job: Path) -> dict:
                 and row.get("verdict") in VALID_VERDICTS
             )
             state["completed"] = sum(state["by_verdict"].values())
+            confirmed = [
+                row for row in decisions
+                if str(row.get("marker_id") or "") in target_ids
+                and row.get("verdict") == "Confirmed"
+            ]
+            for row in confirmed:
+                verification = row.get("verification")
+                status = verification.get("status") if isinstance(verification, dict) else "pending"
+                state["verification"][status if status in {"pending", "verified", "challenged"} else "pending"] += 1
         state["pending"] = max(0, state["total"] - state["completed"])
     except (OSError, json.JSONDecodeError, SystemExit) as exc:
         state["errors"].append(f"inventory/decisions: {exc}")
@@ -156,6 +207,56 @@ def collect_state(job: Path) -> dict:
             "assigned": int(current.get("assigned") or 0),
             "current_saved": int(current.get("saved") or 0),
         }
+
+    verifier_saved: dict[int, set[str]] = defaultdict(set)
+    verifier_batches: dict[int, set[int]] = defaultdict(set)
+    verifier_updated: dict[int, float] = defaultdict(float)
+    if notes.is_dir():
+        for path in notes.iterdir():
+            match = VERIFIER_NOTE_RE.match(path.name)
+            if not match:
+                continue
+            batch, verifier = int(match.group(1)), int(match.group(2))
+            try:
+                for row in note_rows(path):
+                    marker_id = str(row.get("marker_id") or "")
+                    if marker_id:
+                        verifier_saved[verifier].add(marker_id)
+                verifier_batches[verifier].add(batch)
+                verifier_updated[verifier] = max(verifier_updated[verifier], path.stat().st_mtime)
+            except (OSError, json.JSONDecodeError) as exc:
+                state["errors"].append(f"{path.name}: {exc}")
+
+    current_verifiers: dict[int, dict] = {}
+    verifier_status_path = job / "verifiers.status.json"
+    if verifier_status_path.exists():
+        try:
+            verifier_queue = read_json(verifier_status_path)
+            if isinstance(verifier_queue, dict):
+                state["verifier_queue"] = verifier_queue
+                for verifier in verifier_queue.get("verifiers") or []:
+                    if isinstance(verifier, dict) and type(verifier.get("verifier")) is int:
+                        current_verifiers[verifier["verifier"]] = verifier
+        except (OSError, json.JSONDecodeError) as exc:
+            state["errors"].append(f"verifiers.status.json: {exc}")
+    for verifier in sorted(set(verifier_saved) | set(current_verifiers)):
+        current = current_verifiers.get(verifier, {})
+        state["verifiers"][verifier] = {
+            "saved": len(verifier_saved[verifier]),
+            "batches": len(verifier_batches[verifier]),
+            "updated": verifier_updated[verifier],
+            "current_status": current.get("status", "idle"),
+            "assigned": int(current.get("assigned") or 0),
+            "current_saved": int(current.get("saved") or 0),
+        }
+
+    job_path = job / "job.json"
+    if job_path.exists():
+        try:
+            job_data = read_json(job_path)
+            state["token_warning"] = int(job_data.get("saved_context_token_warning") or 0)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            state["errors"].append(f"job.json: {exc}")
 
     control_path = job / "control.json"
     if control_path.exists():
@@ -210,6 +311,14 @@ def render(
     wont_fix = state["by_verdict"].get("Won't fix", 0)
     unclear = state["by_verdict"].get("Unclear", 0)
     pending = state["pending"]
+    verification_required = sum(state.get("verification", {}).values())
+    verification_verified = state.get("verification", {}).get("verified", 0)
+    verification_pending = state.get("verification", {}).get("pending", 0)
+    verification_challenged = state.get("verification", {}).get("challenged", 0)
+    context = state.get("context") or {}
+    estimated_tokens = int(context.get("estimated_tokens") or 0)
+    token_warning = int(state.get("token_warning") or 0)
+    token_color = "yellow" if token_warning and estimated_tokens >= token_warning else "gray"
     bar_color = "green" if total and completed == total else "blue"
     queue_text = "ПАУЗА после текущей партии" if state["paused"] else "работа разрешена"
     queue_color = "yellow" if state["paused"] else "green"
@@ -242,6 +351,22 @@ def render(
             f"{paint(f'Unclear {unclear}', 'magenta', use_color)} | "
             f"{paint(f'Pending {pending}', 'gray', use_color)}"
         ),
+        (
+            "Проверка Confirmed: "
+            f"{paint(f'подтверждено {verification_verified}/{verification_required}', 'green', use_color)} | "
+            f"{paint(f'ожидает {verification_pending}', 'yellow', use_color)} | "
+            f"{paint(f'оспорено {verification_challenged}', 'red', use_color)}"
+        ),
+        (
+            "Токены: "
+            f"{paint(f'≈{estimated_tokens:,}'.replace(',', ' '), token_color, use_color)} "
+            "по сохранённым JSON/трассам; исходники и внутренние рассуждения не входят"
+        ),
+        (
+            "Вызовы агентов: "
+            f"основной анализ {context.get('primary_calls', 0)} | "
+            f"независимая проверка {context.get('verifier_calls', 0)}"
+        ),
         f"Очередь: {paint(queue_text, queue_color, use_color)}",
     ]
     queue = state.get("queue") or {}
@@ -259,6 +384,20 @@ def render(
             )
     if queue:
         lines.append(f"Текущая партия: {queue.get('batch') or '-'}; состояние: {queue.get('state') or '-'}")
+    verifier_queue = state.get("verifier_queue") or {}
+    if state["verifiers"] or verifier_queue:
+        lines.extend(["", paint("Независимая проверка Confirmed:", "bold", use_color)])
+        for number, verifier in state["verifiers"].items():
+            current = f"{verifier['current_status']}: {verifier['current_saved']}/{verifier['assigned']}"
+            lines.append(
+                f"  verifier-{number}: сохранено {verifier['saved']}; партий {verifier['batches']}; "
+                f"{current}; {format_time(verifier['updated'])}"
+            )
+        if verifier_queue:
+            lines.append(
+                f"Партия проверки: {verifier_queue.get('batch') or '-'}; "
+                f"состояние: {verifier_queue.get('state') or '-'}"
+            )
     lines.extend(["", f"Импорт: {paint(state['import'], import_color, use_color)}"])
     preview = state.get("preview")
     if isinstance(preview, dict):
@@ -399,8 +538,8 @@ def check_mcp(mcp_url: str, token: str) -> str:
     return "подключён"
 
 
-def start_svacer_reconnect(root: Path) -> None:
-    script = root / "restart_svacer_http.ps1"
+def start_svacer_reconnect(app_directory: Path) -> None:
+    script = app_directory / "restart_svacer_http.ps1"
     if not script.exists():
         raise FileNotFoundError(f"Не найден {script.name}")
     subprocess.Popen(
@@ -408,7 +547,7 @@ def start_svacer_reconnect(root: Path) -> None:
             "powershell.exe", "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass",
             "-File", str(script),
         ],
-        cwd=str(root),
+        cwd=str(app_directory),
         creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
     )
 
@@ -511,9 +650,10 @@ def main() -> int:
     parser.add_argument("--job")
     parser.add_argument("--once", action="store_true", help="Показать состояние один раз")
     args = parser.parse_args()
-    root = Path(__file__).resolve().parent
+    app_directory = Path(__file__).resolve().parent
+    root = app_directory.parent
     job = resolve_job(root, args.job)
-    settings = read_json(root / "svacer-settings.json")
+    settings = read_json(app_directory / "svacer-settings.json")
     mcp_url = str(settings.get("mcp_url") or "http://127.0.0.1:8002/mcp")
     token = os.getenv("SVACER_LOCAL_MCP_TOKEN", "")
     message = ""
@@ -547,7 +687,7 @@ def main() -> int:
                 message = "Папка задачи открыта."
             elif key == "m":
                 try:
-                    start_svacer_reconnect(root)
+                    start_svacer_reconnect(app_directory)
                     mcp_status = "ожидается вход"
                     message = "Открыто окно входа в Svacer. После успешного запуска нажмите R."
                 except Exception as exc:
@@ -555,7 +695,7 @@ def main() -> int:
                     message = f"Не удалось открыть подключение: {describe_exception(exc)}"
             elif key in {"i", "s"}:
                 if not token:
-                    message = "Нет локального MCP-токена. Запустите setup_mcp.cmd, затем панель заново."
+                    message = "Нет локального MCP-токена. Откройте START.cmd и выберите пункт 6."
                     continue
                 mcp_status = check_mcp(mcp_url, token)
                 if mcp_status != "подключён":

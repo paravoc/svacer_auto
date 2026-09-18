@@ -8,6 +8,7 @@
 )
 
 $ErrorActionPreference = "Stop"
+$toolDirectory = Split-Path -Parent $PSScriptRoot
 $settingsPath = Join-Path $PSScriptRoot "svacer-settings.json"
 if (-not (Test-Path -LiteralPath $settingsPath)) {
     throw "Не найден файл настроек: $settingsPath"
@@ -17,6 +18,10 @@ $filterName = [string]$settings.filter_name
 $advancedFilter = [string]$settings.advanced_filter
 $parallelWorkers = [int]$settings.parallel_workers
 $batchSize = [int]$settings.batch_size
+$verificationEnabled = [bool]$settings.verification_enabled
+$verificationVerdicts = @($settings.verification_verdicts | ForEach-Object { [string]$_ })
+$verificationWorkers = [int]$settings.verification_workers
+$tokenWarning = [int]$settings.saved_context_token_warning
 if ([string]::IsNullOrWhiteSpace($filterName)) {
     throw "В svacer-settings.json не задан filter_name"
 }
@@ -28,6 +33,18 @@ if ($parallelWorkers -lt 1 -or $parallelWorkers -gt 8) {
 }
 if ($batchSize -lt 1 -or $batchSize -gt 50) {
     throw "batch_size должен быть от 1 до 50"
+}
+if ($verificationWorkers -lt 1 -or $verificationWorkers -gt 8) {
+    throw "verification_workers должен быть от 1 до 8"
+}
+if (-not $verificationEnabled) {
+    throw "verification_enabled должен быть true: Confirmed нельзя импортировать без независимой проверки"
+}
+if ($verificationVerdicts.Count -ne 1 -or $verificationVerdicts[0] -cne "Confirmed") {
+    throw "verification_verdicts должен содержать только Confirmed"
+}
+if ($tokenWarning -lt 0) {
+    throw "saved_context_token_warning не может быть отрицательным"
 }
 
 if ([string]::IsNullOrWhiteSpace($SnapshotUrl)) {
@@ -62,7 +79,7 @@ if (-not $snapshotMatch.Success) {
 }
 
 $stamp = (Get-Date -Format "yyyyMMdd-HHmmss") + "-" + [guid]::NewGuid().ToString("N").Substring(0, 8)
-$jobDir = Join-Path (Join-Path $PSScriptRoot "RESULTS") $stamp
+$jobDir = Join-Path (Join-Path $toolDirectory "RESULTS") $stamp
 $null = New-Item -ItemType Directory -Path $jobDir
 $null = New-Item -ItemType Directory -Path (Join-Path $jobDir "raw") -Force
 $null = New-Item -ItemType Directory -Path (Join-Path $jobDir "notes") -Force
@@ -78,7 +95,12 @@ $job = [ordered]@{
     advanced_filter = $advancedFilter
     parallel_workers = $parallelWorkers
     batch_size = $batchSize
-    tool_directory = $PSScriptRoot
+    verification_enabled = $verificationEnabled
+    verification_verdicts = $verificationVerdicts
+    verification_workers = $verificationWorkers
+    saved_context_token_warning = $tokenWarning
+    tool_directory = $toolDirectory
+    app_directory = $PSScriptRoot
     job_directory = $jobDir
     created_at = (Get-Date).ToString("o")
 }

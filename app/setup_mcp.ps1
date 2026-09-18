@@ -1,6 +1,7 @@
 ﻿$ErrorActionPreference = "Stop"
 
-$pythonPath = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
+$toolDirectory = Split-Path -Parent $PSScriptRoot
+$pythonPath = Join-Path $toolDirectory ".venv\Scripts\python.exe"
 $repoPath = Join-Path $PSScriptRoot "svacer-mcp"
 
 if (-not (Get-Command codex -ErrorAction SilentlyContinue)) {
@@ -18,13 +19,13 @@ if (-not (Test-Path -LiteralPath $pythonPath)) {
     $pythonCommand = Get-Command python -ErrorAction SilentlyContinue
     $pyCommand = Get-Command py -ErrorAction SilentlyContinue
     if ($pythonCommand) {
-        & $pythonCommand.Source -m venv (Join-Path $PSScriptRoot ".venv")
+        & $pythonCommand.Source -m venv (Join-Path $toolDirectory ".venv")
     }
     if (-not (Test-Path -LiteralPath $pythonPath) -and $pyCommand) {
-        & $pyCommand.Source -3 -m venv (Join-Path $PSScriptRoot ".venv")
+        & $pyCommand.Source -3 -m venv (Join-Path $toolDirectory ".venv")
     }
     if (-not $pythonCommand -and -not $pyCommand) {
-        throw "Python не найден. Установи Python 3.10 или новее и повтори setup_mcp.cmd"
+        throw "Python не найден. Установи Python 3.10 или новее и снова выбери пункт 6 в START.cmd"
     }
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $pythonPath)) {
         throw "Не удалось создать локальное Python-окружение"
@@ -72,6 +73,6 @@ if ($LASTEXITCODE -ne 0) { throw "Не удалось зарегистриров
 
 Write-Host ""
 Write-Host "Svacer MCP зарегистрирован."
-Write-Host "Теперь один раз запусти start_svacer_http.cmd и войди в Svacer."
+Write-Host "Теперь вернись в START.cmd выбери пункт 3 и войди в Svacer."
 Write-Host "Оставь открывшееся окно сервера запущенным на время разметки."
 Write-Host "После этого полностью перезапусти Codex Desktop."

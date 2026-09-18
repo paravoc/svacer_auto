@@ -32,6 +32,7 @@ VALID_VERDICTS = {"Confirmed", "False Positive", "Won't fix", "Unclear"}
 VALID_CONFIDENCE = {"high", "medium", "low"}
 VALID_SEVERITIES = {"Critical", "Major", "Minor"}
 VALID_ACTIONS = {"Fix required", "Fix submitted", "Ignore"}
+STRICT_SCHEMA_VERSION = 2
 HEADINGS = {
     "Confirmed": "CONFIRMED",
     "False Positive": "FALSE POSITIVE",
@@ -274,7 +275,13 @@ def _validate_decisions(rows: list[dict], inventory: dict[str, dict]) -> dict[st
             continue
         if row.get("confidence") not in VALID_CONFIDENCE:
             errors.append(f"{marker_id}: invalid confidence")
-        for name in ("source", "control", "sink"):
+        strict = row.get("schema_version") == STRICT_SCHEMA_VERSION
+        required_text = ["source", "control", "sink"]
+        if strict:
+            required_text.extend([
+                "entrypoint", "build_reachability", "product_reachability", "impact",
+            ])
+        for name in required_text:
             if not isinstance(row.get(name), str) or not row[name].strip():
                 errors.append(f"{marker_id}: empty {name}")
         for name in ("reachable_path", "evidence", "counterevidence", "proof_gaps"):
@@ -282,8 +289,16 @@ def _validate_decisions(rows: list[dict], inventory: dict[str, dict]) -> dict[st
                 errors.append(f"{marker_id}: {name} must be an array")
         if isinstance(row.get("evidence"), list) and not row["evidence"]:
             errors.append(f"{marker_id}: evidence is empty")
-        if not isinstance(row.get("boundary"), dict):
+        boundary = row.get("boundary")
+        if not isinstance(boundary, dict):
             errors.append(f"{marker_id}: boundary must be an object")
+        elif strict:
+            for name in ("product_surface", "source_trust", "policy_basis"):
+                value = boundary.get(name)
+                if not isinstance(value, str) or not value.strip() or value.strip().casefold() == "unknown":
+                    errors.append(f"{marker_id}: boundary.{name} is not established")
+            if type(boundary.get("boundary_crossed")) is not bool:
+                errors.append(f"{marker_id}: boundary.boundary_crossed must be bool")
         comment = row.get("comment")
         nonempty = [line.strip() for line in str(comment or "").splitlines() if line.strip()]
         if not nonempty or nonempty[0] != HEADINGS[verdict] or len(nonempty) < 2:
@@ -293,8 +308,38 @@ def _validate_decisions(rows: list[dict], inventory: dict[str, dict]) -> dict[st
                 errors.append(f"{marker_id}: Confirmed requires severity")
             if row.get("action") not in VALID_ACTIONS:
                 errors.append(f"{marker_id}: Confirmed requires action")
+            verification = row.get("verification")
+            if not isinstance(verification, dict) or verification.get("status") != "verified":
+                errors.append(f"{marker_id}: Confirmed requires independent verification")
+            elif (
+                not isinstance(verification.get("verifier_id"), str)
+                or not verification["verifier_id"].strip()
+                or not isinstance(verification.get("reason"), str)
+                or not verification["reason"].strip()
+                or not isinstance(verification.get("evidence"), list)
+                or not verification["evidence"]
+                or not isinstance(verification.get("rechecked_paths"), list)
+                or not verification["rechecked_paths"]
+            ):
+                errors.append(f"{marker_id}: independent verification evidence is incomplete")
+            if strict and not row.get("reachable_path"):
+                errors.append(f"{marker_id}: Confirmed requires reachable_path")
+            if strict and row.get("proof_gaps"):
+                errors.append(f"{marker_id}: Confirmed must not contain proof_gaps")
         elif "severity" in row or "action" in row:
             errors.append(f"{marker_id}: {verdict} must not contain severity/action")
+        if strict and verdict == "False Positive":
+            if not row.get("counterevidence"):
+                errors.append(f"{marker_id}: False Positive requires counterevidence")
+            if row.get("proof_gaps"):
+                errors.append(f"{marker_id}: False Positive must not contain proof_gaps")
+        if strict and verdict == "Won't fix":
+            if not row.get("reachable_path"):
+                errors.append(f"{marker_id}: Won't fix requires reachable_path")
+            if row.get("proof_gaps"):
+                errors.append(f"{marker_id}: Won't fix must not contain proof_gaps")
+        if strict and verdict == "Unclear" and not row.get("proof_gaps"):
+            errors.append(f"{marker_id}: Unclear requires proof_gaps")
     missing = sorted(set(target_inventory) - set(by_id))
     if missing:
         errors.append(f"missing decisions: {missing[:10]}")

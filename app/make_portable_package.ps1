@@ -1,14 +1,16 @@
 ﻿$ErrorActionPreference = "Stop"
 
-# Explicit file list: never recursively copy the operator's working directory.
-$rootFiles = @(
-    'START.ps1', 'START.cmd', 'README.md', 'CODEX_TASK.md', 'TEST_REPORT.md',
+# Only this explicit allowlist is packaged. Runtime data and credentials are excluded.
+$toolDirectory = Split-Path -Parent $PSScriptRoot
+$rootFiles = @('START.cmd', 'README.md')
+$appFiles = @(
+    'START.ps1', 'CODEX_TASK.md',
     'new_triage_job.ps1', 'new_triage_job.cmd',
     'setup_mcp.ps1', 'setup_mcp.cmd', 'start_svacer_http.ps1', 'start_svacer_http.py',
     'start_svacer_http.cmd', 'restart_svacer_http.ps1', 'restart_svacer_http.cmd',
     'stop_components.ps1', 'STOP SVACER.cmd', 'STOP ANALYZE.cmd', 'STOP ALL.cmd',
-    'triage_dashboard.py', 'triage_dashboard.ps1',
-    'triage_dashboard.cmd', 'make_portable_package.ps1', 'make_portable_package.cmd',
+    'triage_dashboard.py', 'triage_dashboard.ps1', 'triage_dashboard.cmd',
+    'make_portable_package.ps1', 'make_portable_package.cmd',
     'triage_queue.py', 'make_mcp_decisions_template.py', 'validate_mcp_decisions.py',
     'export_decisions_csv.py', 'extract_gost_markers.py', 'run_extractor.cmd',
     'make_decisions_template.py', 'validate_decisions.py', 'svacer-settings.json',
@@ -23,8 +25,10 @@ $modules = @(
     'tools/file_preview.py', 'tools/diff.py', 'tools/descriptions.py',
     'tools/markup_import.py'
 )
-$files = @($rootFiles) + @($modules | ForEach-Object { "svacer-mcp/svacer_mcp/$_" })
-$rootPath = [IO.Path]::GetFullPath($PSScriptRoot)
+$files = @($rootFiles) + @($appFiles | ForEach-Object { "app/$_" }) +
+    @($modules | ForEach-Object { "app/svacer-mcp/svacer_mcp/$_" })
+$rootPath = [IO.Path]::GetFullPath($toolDirectory)
+
 foreach ($relative in $files) {
     $item = Get-Item -LiteralPath (Join-Path $rootPath $relative)
     if ($item.PSIsContainer) { throw "Expected file: $relative" }
@@ -36,10 +40,11 @@ foreach ($relative in $files) {
         if ($node -is [IO.FileInfo]) { $node = $node.Directory } else { $node = $node.Parent }
     }
 }
+
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $stamp = (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
-$archiveDirectory = Join-Path $PSScriptRoot "ARCHIVE"
+$archiveDirectory = Join-Path $toolDirectory "ARCHIVE"
 if (-not (Test-Path -LiteralPath $archiveDirectory)) {
     New-Item -ItemType Directory -Path $archiveDirectory | Out-Null
 }
@@ -51,7 +56,7 @@ try {
         $null = $zip.CreateEntry("svacer_gost_triage/RESULTS/")
         foreach ($relative in $files) {
             $null = [IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
-                $zip, (Join-Path $PSScriptRoot $relative),
+                $zip, (Join-Path $rootPath $relative),
                 "svacer_gost_triage/$relative", [IO.Compression.CompressionLevel]::Optimal)
         }
     }
@@ -63,4 +68,4 @@ catch {
 }
 finally { $archiveStream.Dispose() }
 Write-Host "Переносимый архив создан: $archivePath"
-Write-Host "Файлов: $($files.Count). На другом компьютере распакуйте и запустите START.cmd."
+Write-Host "На другом компьютере распакуйте архив и запустите только START.cmd"

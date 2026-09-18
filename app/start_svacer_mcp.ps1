@@ -1,7 +1,8 @@
 ﻿$ErrorActionPreference = "Stop"
 
+$toolDirectory = Split-Path -Parent $PSScriptRoot
 $settingsPath = Join-Path $PSScriptRoot "svacer-settings.json"
-$pythonPath = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
+$pythonPath = Join-Path $toolDirectory ".venv\Scripts\python.exe"
 
 if (-not (Test-Path -LiteralPath $settingsPath)) {
     [Console]::Error.WriteLine("Svacer MCP settings not found: $settingsPath")

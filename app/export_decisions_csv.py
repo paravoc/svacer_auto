@@ -30,8 +30,10 @@ def main() -> int:
     output.parent.mkdir(parents=True, exist_ok=True)
     columns = [
         "marker_id", "warnClass", "file", "line", "verdict", "severity",
-        "action", "confidence", "comment", "source", "control", "sink",
-        "reachable_path", "evidence", "counterevidence", "proof_gaps",
+        "action", "confidence", "comment", "entrypoint", "source", "control", "sink",
+        "build_reachability", "product_reachability", "reachable_path", "impact",
+        "evidence", "counterevidence", "proof_gaps", "verification_status",
+        "verification_verifier", "verification_reason", "verification_evidence",
     ]
     with output.open("w", encoding="utf-8-sig", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=columns, extrasaction="ignore")
@@ -40,6 +42,13 @@ def main() -> int:
             row = dict(item)
             for name in ("reachable_path", "evidence", "counterevidence", "proof_gaps"):
                 row[name] = "\n".join(str(value) for value in item.get(name, []))
+            verification = item.get("verification") if isinstance(item.get("verification"), dict) else {}
+            row["verification_status"] = verification.get("status", "")
+            row["verification_verifier"] = verification.get("verifier_id", "")
+            row["verification_reason"] = verification.get("reason", "")
+            row["verification_evidence"] = "\n".join(
+                str(value) for value in verification.get("evidence", [])
+            )
             writer.writerow(row)
     print(f"CSV для ручной проверки: {output}")
     return 0

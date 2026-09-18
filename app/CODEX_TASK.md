@@ -20,12 +20,19 @@
 - `advanced_filter` — точное выражение Svacer для отбора маркеров;
 - `parallel_workers` — желаемое максимальное число подагентов;
 - `batch_size` — общее число маркеров в одной партии;
+- `verification_enabled`, `verification_verdicts`, `verification_workers` —
+  обязательная независимая проверка `Confirmed`;
+- `saved_context_token_warning` — порог предупреждения панели для примерного
+  размера сохранённого контекста;
 - `tool_directory` — каталог переносимого набора скриптов;
+- `app_directory` — каталог служебных файлов программы;
 - `job_directory`.
 
 Для старого job без трёх новых параметров используй совместимые значения:
-`parallel_workers = 3`, `batch_size = 15`, а `tool_directory` равен каталогу,
-в котором лежит этот `CODEX_TASK.md`. Сам старый `job.json` не изменяй.
+`parallel_workers = 3`, `batch_size = 15`, `app_directory` равен каталогу с
+этим `CODEX_TASK.md`, `verification_enabled = true`,
+`verification_verdicts = ["Confirmed"]`, `verification_workers = 2`, а
+`tool_directory` — его родительскому каталогу. Сам старый `job.json` не изменяй.
 
 Обязательно проверь, что `advanced_filter` в точности равен
 `filter(markers, "ГОСТ 71207-2024" in .checker_labels)`. Не добавляй severity,
@@ -80,7 +87,7 @@ file и line. Если эти поля совпадают, используй с
 Затем создай возобновляемый шаблон:
 
 ```powershell
-& "<tool_directory>\.venv\Scripts\python.exe" "<tool_directory>\make_mcp_decisions_template.py" `
+& "<tool_directory>\.venv\Scripts\python.exe" "<tool_directory>\app\make_mcp_decisions_template.py" `
   --inventory "<job_directory>\markers.inventory.json" `
   --out "<job_directory>\decisions.jsonl"
 ```
@@ -94,7 +101,7 @@ file и line. Если эти поля совпадают, используй с
 Следующую компактную партию всегда получай через локальную очередь:
 
 ```powershell
-& "<tool_directory>\.venv\Scripts\python.exe" "<tool_directory>\triage_queue.py" `
+& "<tool_directory>\.venv\Scripts\python.exe" "<tool_directory>\app\triage_queue.py" `
   --inventory "<job_directory>\markers.inventory.json" `
   --decisions "<job_directory>\decisions.jsonl" `
   next --limit <batch_size> --workers <parallel_workers>
@@ -183,16 +190,32 @@ limit = 0
 7. Единственный писатель всех файлов задачи — координатор.
 
 Каждое решение подагента должно содержать поля шаблона `decisions.jsonl`:
-`marker_id`, `warnClass`, `file`, `line`, `verdict`, `confidence`, `source`,
-`control`, `sink`, `reachable_path`, `boundary`, `evidence`, `counterevidence`,
-`proof_gaps`, `comment`; для `Confirmed` также `severity` и `action`.
+`schema_version`, `marker_id`, `warnClass`, `file`, `line`, `verdict`,
+`confidence`, `entrypoint`, `source`, `control`, `sink`, `build_reachability`,
+`product_reachability`, `reachable_path`, `impact`, `boundary`, `evidence`,
+`counterevidence`, `proof_gaps`, `comment`; для `Confirmed` также `severity` и
+`action`. Поле `verification` подагент не заполняет: им управляет очередь.
+
+Для решений `schema_version=2` обязательно:
+
+- `entrypoint` — реальный вход в рассматриваемый путь;
+- `build_reachability` — почему код входит или не входит в указанную сборку;
+- `product_reachability` — конкретная цепочка из работающего продукта либо
+  доказанная причина недостижимости;
+- `impact` — доказанное последствие либо объяснение, почему оно отсутствует;
+- `boundary` содержит конкретные `product_surface`, `source_trust`,
+  `boundary_crossed` типа bool и `policy_basis`, без `unknown`;
+- `Confirmed` и `Won't fix` имеют непустой `reachable_path` и не имеют
+  `proof_gaps`;
+- `False Positive` имеет непустой `counterevidence` и не имеет `proof_gaps`;
+- `Unclear` содержит конкретный непустой `proof_gaps`.
 
 Координатор сохраняет ответы подагентов как JSON-массивы в
 `<job_directory>/notes/batch-NNN-worker-N.json`, после чего атомарно применяет
 всю партию:
 
 ```powershell
-& "<tool_directory>\.venv\Scripts\python.exe" "<tool_directory>\triage_queue.py" `
+& "<tool_directory>\.venv\Scripts\python.exe" "<tool_directory>\app\triage_queue.py" `
   --inventory "<job_directory>\markers.inventory.json" `
   --decisions "<job_directory>\decisions.jsonl" `
   apply --results <файлы результатов всех работников> `
@@ -201,6 +224,69 @@ limit = 0
 
 Команда `apply` отклоняет неизвестные, повторные, уже заполненные или не
 назначенные marker ID и ничего не записывает при любой ошибке.
+
+### Независимая проверка Confirmed
+
+После сохранения основной партии запроси очередь проверки:
+
+```powershell
+& "<tool_directory>\.venv\Scripts\python.exe" "<tool_directory>\app\triage_queue.py" `
+  --inventory "<job_directory>\markers.inventory.json" `
+  --decisions "<job_directory>\decisions.jsonl" `
+  verify-next --limit 5 --workers <verification_workers>
+```
+
+Если `batch.marker_ids` пуст, продолжай основной анализ. Иначе каждый назначенный
+`Confirmed` передай свежему подагенту, который не выполнял его первичный анализ.
+Проверяющий заново читает текущие исходники и трассу и активно пытается опровергнуть
+вывод. Он не меняет общие файлы и возвращает только JSON-массив.
+
+Успешная проверка:
+
+```json
+{
+  "marker_id": "...",
+  "decision": "verified",
+  "verifier_id": "verifier-1",
+  "reason": "Почему полный путь и impact подтверждены",
+  "evidence": ["path:line — проверенный факт"],
+  "rechecked_paths": ["relative/path.cc"]
+}
+```
+
+Простое сомнение не является результатом. `challenged` допускается только при
+конкретном противоречии исходникам или решающем пробеле:
+
+```json
+{
+  "marker_id": "...",
+  "decision": "challenged",
+  "verifier_id": "verifier-1",
+  "reason": "Краткий проверенный вывод",
+  "evidence": ["path:line — факт, противоречащий Confirmed"],
+  "rechecked_paths": ["relative/path.cc"],
+  "challenge_type": "source_contradiction | preventing_control | build_reachability_gap | product_reachability_gap | impact_gap | revision_mismatch",
+  "specific_issue": "Что именно неверно или не доказано",
+  "resolution_needed": "Что конкретно надо проверить для снятия расхождения",
+  "recommended_verdict": "False Positive | Won't fix | Unclear"
+}
+```
+
+Координатор обязан сам открыть указанное доказательство. Не сохраняй challenge,
+если там лишь общие слова, другая версия кода или отсутствует проверяемый факт.
+Сохрани ответы как `notes/verify-batch-NNN-verifier-N.json` и примени:
+
+```powershell
+& "<tool_directory>\.venv\Scripts\python.exe" "<tool_directory>\app\triage_queue.py" `
+  --inventory "<job_directory>\markers.inventory.json" `
+  --decisions "<job_directory>\decisions.jsonl" `
+  verify-apply --results <файлы проверяющих> --allowed-ids <marker_id проверки>
+```
+
+`verified` разрешает будущий импорт. `challenged` не меняет вердикт автоматически,
+но блокирует импорт. Покажи расхождение пользователю и верни маркер в основной
+анализ командой `reopen`; после нового `Confirmed` обязательна новая независимая
+проверка.
 
 При блокировке очереди останови запись и сообщи об ошибке. Не удаляй lock
 автоматически и не обходи `apply` прямой перезаписью decisions.jsonl. Общая
@@ -241,7 +327,7 @@ UNCLEAR
 После сохранения каждой партии проверь состояние:
 
 ```powershell
-& "<tool_directory>\.venv\Scripts\python.exe" "<tool_directory>\triage_queue.py" `
+& "<tool_directory>\.venv\Scripts\python.exe" "<tool_directory>\app\triage_queue.py" `
   --inventory "<job_directory>\markers.inventory.json" `
   --decisions "<job_directory>\decisions.jsonl" `
   progress
@@ -254,7 +340,7 @@ UNCLEAR
 Если пользователь попросил пересмотреть конкретный вывод, верни его в очередь:
 
 ```powershell
-& "<tool_directory>\.venv\Scripts\python.exe" "<tool_directory>\triage_queue.py" `
+& "<tool_directory>\.venv\Scripts\python.exe" "<tool_directory>\app\triage_queue.py" `
   --inventory "<job_directory>\markers.inventory.json" `
   --decisions "<job_directory>\decisions.jsonl" `
   reopen --ids <marker_id>
@@ -265,7 +351,7 @@ UNCLEAR
 Проверь итог:
 
 ```powershell
-& "<tool_directory>\.venv\Scripts\python.exe" "<tool_directory>\validate_mcp_decisions.py" `
+& "<tool_directory>\.venv\Scripts\python.exe" "<tool_directory>\app\validate_mcp_decisions.py" `
   --inventory "<job_directory>\markers.inventory.json" `
   --decisions "<job_directory>\decisions.jsonl"
 ```
@@ -273,7 +359,7 @@ UNCLEAR
 Исправь все ошибки валидатора. После успешной проверки создай таблицу:
 
 ```powershell
-& "<tool_directory>\.venv\Scripts\python.exe" "<tool_directory>\export_decisions_csv.py" `
+& "<tool_directory>\.venv\Scripts\python.exe" "<tool_directory>\app\export_decisions_csv.py" `
   --decisions "<job_directory>\decisions.jsonl" `
   --out "<job_directory>\decisions.csv"
 ```

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from test_mcp_pipeline import ROOT, inventory, run_script
+from test_mcp_pipeline import APP, ROOT, inventory, run_script
 
 
 def prepare(tmp_path):
@@ -20,9 +20,26 @@ def prepare(tmp_path):
     assert result.returncode == 0, result.stderr
     rows = [json.loads(line) for line in dec.read_text(encoding="utf-8").splitlines()]
     for row in rows:
-        row.update(verdict="False Positive", confidence="high", source="fixture", control="guard",
-                   sink="read", evidence=["Synthetic test, not a product finding"],
-                   comment="FALSE POSITIVE\nSynthetic validation fixture.")
+        row.update(
+            verdict="False Positive",
+            confidence="high",
+            entrypoint="synthetic caller",
+            source="fixture",
+            control="guard",
+            sink="read",
+            build_reachability="synthetic target is selected",
+            product_reachability="guard prevents the reported state",
+            impact="none because the path is unreachable",
+            boundary={
+                "product_surface": "synthetic fixture",
+                "source_trust": "test input",
+                "boundary_crossed": False,
+                "policy_basis": "guard dominates the read",
+            },
+            evidence=["Synthetic test, not a product finding"],
+            counterevidence=["Synthetic guard prevents the reported state"],
+            comment="FALSE POSITIVE\nSynthetic validation fixture.",
+        )
     return inv, dec, rows
 
 
@@ -106,7 +123,7 @@ def powershell(script, *args, cwd=None):
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows PowerShell 5.1 portability test")
 def test_portable_archive_in_cyrillic_directory(tmp_path):
-    packed = powershell(ROOT / "make_portable_package.ps1")
+    packed = powershell(APP / "make_portable_package.ps1")
     assert packed.returncode == 0, packed.stderr.decode(errors="replace")
     archive = max(
         (ROOT / "ARCHIVE").glob("svacer_gost_triage_portable_*.zip"),
@@ -121,7 +138,7 @@ def test_portable_archive_in_cyrillic_directory(tmp_path):
     app = destination / "svacer_gost_triage"
     # Only our synthetic unrelated file is added, never any real credential file.
     (app / "private-notes.txt").write_text("DO NOT PACKAGE", encoding="utf-8")
-    repacked = powershell(app / "make_portable_package.ps1", cwd=tmp_path)
+    repacked = powershell(app / "app" / "make_portable_package.ps1", cwd=tmp_path)
     assert repacked.returncode == 0, repacked.stderr.decode(errors="replace")
     with zipfile.ZipFile(next((app / "ARCHIVE").glob("*.zip"))) as z:
         assert set(z.namelist()) == set(names)
@@ -129,7 +146,7 @@ def test_portable_archive_in_cyrillic_directory(tmp_path):
     snapshot = "http://svacer01.sec.dev.rvision.local:8080/mode/review/project/" + ids[0] + "/branch/" + ids[1] + "/snapshot/" + ids[2]
     arguments = ["-SnapshotUrl", snapshot, "-RepositoryUrl", "https://example.invalid/project.git", "-GitRef", "v1.0", "-NoClipboard", "-NoOpen", "-NoDashboard"]
     for _ in range(2):
-        result = subprocess.run([str(app / "new_triage_job.cmd"), *arguments],
+        result = subprocess.run([str(app / "app" / "new_triage_job.cmd"), *arguments],
                                 input=b"\n", capture_output=True, timeout=30, cwd=tmp_path)
         assert result.returncode == 0, result.stderr.decode(errors="replace")
         jobs = list((app / "RESULTS").glob("*/job.json"))
@@ -139,9 +156,14 @@ def test_portable_archive_in_cyrillic_directory(tmp_path):
         assert [job[k] for k in ("project_id", "branch_id", "snapshot_id")] == ids
         assert job["tool_directory"] == str(app)
         assert job["advanced_filter"] == inventory()["filters_applied"]["advanced_filter"]
+        assert job["app_directory"] == str(app / "app")
         assert job["parallel_workers"] == 3 and job["batch_size"] == 15
+        assert job["verification_enabled"] is True
+        assert job["verification_verdicts"] == ["Confirmed"]
+        assert job["verification_workers"] == 2
+        assert job["saved_context_token_warning"] == 200000
         assert str(app) in (job_path.parent / "START_PROMPT.txt").read_text(encoding="utf-8-sig")
-    result = powershell(app / "new_triage_job.ps1", *[a.replace("svacer01.sec.dev.rvision.local", "wrong.invalid") for a in arguments])
+    result = powershell(app / "app" / "new_triage_job.ps1", *[a.replace("svacer01.sec.dev.rvision.local", "wrong.invalid") for a in arguments])
     assert result.returncode != 0
     assert len(list((app / "RESULTS").glob("*/job.json"))) == 2
     # Compile packaged Python sources; do not start a server or execute product code.
@@ -157,7 +179,7 @@ def test_portable_archive_in_cyrillic_directory(tmp_path):
         ("validate_mcp_decisions.py", ["--inventory", str(inv), "--decisions", str(dec)]),
         ("export_decisions_csv.py", ["--decisions", str(dec), "--out", str(tmp_path / "packaged.csv")]),
     ]:
-        result = subprocess.run([sys.executable, str(app / script), *args], capture_output=True, timeout=30, cwd=tmp_path)
+        result = subprocess.run([sys.executable, str(app / "app" / script), *args], capture_output=True, timeout=30, cwd=tmp_path)
         assert result.returncode == 0, result.stderr.decode(errors="replace")
 
 
@@ -167,21 +189,21 @@ def test_powershell_encoding_and_occupied_port(tmp_path):
     checker = tmp_path / "parse.ps1"
     checker.write_text("param([string]$Root)\n"
                        "if ($PSVersionTable.PSVersion.Major -ne 5) { throw 'Expected Windows PowerShell 5' }\n"
-                       "Get-ChildItem -LiteralPath $Root -Filter '*.ps1' | ForEach-Object {\n"
+                       "Get-ChildItem -LiteralPath $Root -Filter '*.ps1' -Recurse | ForEach-Object {\n"
                        "  $b = [IO.File]::ReadAllBytes($_.FullName)\n"
                        "  if (($b[0..2] -join ',') -ne '239,187,191') { throw ('Missing BOM: ' + $_.Name) }\n"
                        "  $tokens=$null; $parseErrors=$null\n"
                        "  $null = [Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$parseErrors)\n"
                        "  if ($parseErrors.Count) { throw ('Parse error: ' + $_.Name) }\n"
                        "}\n", encoding="utf-8-sig")
-    checked = powershell(checker, "-Root", str(ROOT))
+    checked = powershell(checker, "-Root", str(APP))
     assert checked.returncode == 0, checked.stderr.decode(errors="replace")
     wrapper = tmp_path / "occupied.ps1"
     wrapper.write_text("param([string]$Script)\n"
                        "function global:Get-NetTCPConnection { [pscustomobject]@{ State='Listen' } }\n"
                        "function global:Read-Host { return '' }\n"
                        "& $Script\nexit $LASTEXITCODE\n", encoding="utf-8-sig")
-    checked = powershell(wrapper, "-Script", str(ROOT / "start_svacer_http.ps1"))
+    checked = powershell(wrapper, "-Script", str(APP / "start_svacer_http.ps1"))
     assert checked.returncode == 3, checked.stderr.decode(errors="replace")
 
 
@@ -191,8 +213,9 @@ def test_stop_analyze_pauses_all_local_jobs(tmp_path):
     job = tool / "RESULTS" / "job-1"
     job.mkdir(parents=True)
     (job / "job.json").write_text("{}", encoding="utf-8")
-    script = tool / "stop_components.ps1"
-    script.write_bytes((ROOT / "stop_components.ps1").read_bytes())
+    script = tool / "app" / "stop_components.ps1"
+    script.parent.mkdir(parents=True)
+    script.write_bytes((APP / "stop_components.ps1").read_bytes())
 
     stopped = powershell(script, "-Mode", "Analyze")
 

@@ -4,5 +4,9 @@
   "filter_name": "ГОСТ 71207-2024",
   "advanced_filter": "filter(markers, \"ГОСТ 71207-2024\" in .checker_labels)",
   "parallel_workers": 3,
-  "batch_size": 15
+  "batch_size": 15,
+  "verification_enabled": true,
+  "verification_verdicts": ["Confirmed"],
+  "verification_workers": 2,
+  "saved_context_token_warning": 200000
 }

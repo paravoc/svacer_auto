@@ -45,7 +45,18 @@ def decision(marker_id: str, line: int, verdict: str) -> dict:
         }[verdict],
     }
     if verdict == "Confirmed":
-        row.update(severity="Major", action="Fix required")
+        row.update(
+            severity="Major",
+            action="Fix required",
+            verification={
+                "status": "verified",
+                "verifier_id": "verifier-1",
+                "reason": "Fixture path was independently checked.",
+                "evidence": ["/src/test.cc:10"],
+                "rechecked_paths": ["/src/test.cc"],
+                "verified_at": "2026-01-01T00:00:00Z",
+            },
+        )
     return row
 
 
@@ -158,6 +169,20 @@ def context(api):
     return SimpleNamespace(
         request_context=SimpleNamespace(lifespan_context={"api_client": api})
     )
+
+
+@pytest.mark.asyncio
+async def test_prepare_blocks_unverified_confirmed(monkeypatch, tmp_path):
+    root, job, export_rows = make_job(tmp_path)
+    rows = [json.loads(line) for line in (job / "decisions.jsonl").read_text().splitlines()]
+    rows[0]["verification"] = {"status": "pending"}
+    (job / "decisions.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+    monkeypatch.setenv("SVACER_TRIAGE_ROOT", str(root))
+
+    with pytest.raises(ValueError, match="independent verification"):
+        await prepare_markup_import(str(job), context(FakeAPI(export_rows)))
 
 
 @pytest.mark.asyncio

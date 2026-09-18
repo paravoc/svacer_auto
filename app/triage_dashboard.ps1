@@ -3,10 +3,11 @@
 )
 
 $ErrorActionPreference = "Stop"
-$pythonPath = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
+$toolDirectory = Split-Path -Parent $PSScriptRoot
+$pythonPath = Join-Path $toolDirectory ".venv\Scripts\python.exe"
 $dashboardPath = Join-Path $PSScriptRoot "triage_dashboard.py"
 if (-not (Test-Path -LiteralPath $pythonPath)) {
-    throw "Не найдено Python-окружение. Сначала запустите setup_mcp.cmd"
+    throw "Не найдено Python-окружение. Откройте START.cmd и выберите пункт 6"
 }
 $localToken = [Environment]::GetEnvironmentVariable("SVACER_LOCAL_MCP_TOKEN", "User")
 if (-not [string]::IsNullOrWhiteSpace($localToken)) {

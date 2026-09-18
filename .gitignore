@@ -4,13 +4,13 @@ jobs/
 RESULTS/
 ARCHIVE/
 svacer-http.log
-svacer-mcp/.env
+app/svacer-mcp/.env
 
 # Python generated files
 __pycache__/
 *.py[cod]
 .pytest_cache/
-svacer-mcp/*.egg-info/
+app/svacer-mcp/*.egg-info/
 
 # Local editor files
 .idea/

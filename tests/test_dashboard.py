@@ -118,3 +118,37 @@ def test_colored_render_has_status_colors_but_plain_render_does_not(tmp_path):
     plain = render(state, use_color=False)
     assert "\033[" in colored
     assert "\033[" not in plain
+
+
+def test_dashboard_shows_confirmed_verification_and_token_estimate(tmp_path):
+    job = tmp_path / "job"
+    job.mkdir()
+    inv = inventory()
+    write_json(job / "markers.inventory.json", inv)
+    decisions = [
+        {
+            "marker_id": "m1", "verdict": "Confirmed",
+            "verification": {"status": "verified"},
+        },
+        {
+            "marker_id": "m2", "verdict": "Confirmed",
+            "verification": {
+                "status": "challenged", "specific_issue": "reachable path is incomplete",
+            },
+        },
+    ]
+    (job / "decisions.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in decisions), encoding="utf-8"
+    )
+    write_json(job / "notes" / "batch-001-worker-1.json", [decisions[0]])
+    write_json(job / "notes" / "verify-batch-001-verifier-1.json", [{"marker_id": "m1"}])
+
+    state = collect_state(job)
+    output = render(state)
+
+    assert state["verification"]["verified"] == 1
+    assert state["verification"]["challenged"] == 1
+    assert state["context"]["primary_calls"] == 1
+    assert state["context"]["verifier_calls"] == 1
+    assert "Проверка Confirmed: подтверждено 1/2" in output
+    assert "Токены: ≈" in output

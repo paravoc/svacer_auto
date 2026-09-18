@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "extract_gost_markers.py"
+MODULE_PATH = Path(__file__).resolve().parents[1] / "app" / "extract_gost_markers.py"
 SPEC = importlib.util.spec_from_file_location("extract_gost_markers", MODULE_PATH)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None

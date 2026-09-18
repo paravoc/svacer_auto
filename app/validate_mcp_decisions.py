@@ -8,7 +8,12 @@ import json
 import sys
 from collections import Counter
 from pathlib import Path
-from triage_queue import load_inventory, markers_for_triage, validate_worker_result
+from triage_queue import (
+    load_inventory,
+    markers_for_triage,
+    validate_worker_result,
+    verification_status,
+)
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -52,8 +57,12 @@ def main() -> int:
             continue
         if marker_id not in inventory:
             continue
-        marker = inventory[marker_id]
+        marker = dict(inventory[marker_id])
+        if decision.get("schema_version") is not None:
+            marker["schema_version"] = decision.get("schema_version")
         errors.extend(validate_worker_result(decision, marker))
+        if decision.get("verdict") == "Confirmed" and verification_status(decision) != "verified":
+            errors.append(f"{marker_id}: Confirmed не прошёл независимую проверку")
 
     for marker_id in inventory:
         if seen[marker_id] == 0:
