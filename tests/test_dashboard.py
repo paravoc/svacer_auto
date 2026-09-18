@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 from test_mcp_pipeline import inventory, inventory_with_existing_review, run_script
 from triage_dashboard import collect_state, describe_exception, mcp_text, render, set_pause
-from triage_gui import format_count
+from triage_gui import comment_without_heading, format_count, list_text, short_file
 
 
 def write_json(path: Path, value) -> None:
@@ -157,3 +157,10 @@ def test_dashboard_shows_confirmed_verification_and_token_estimate(tmp_path):
 
 def test_gui_formats_large_counts_for_readability():
     assert format_count(514878) == "514 878"
+
+
+def test_gui_marker_helpers_prepare_readable_details():
+    assert short_file("/tmp/source/example.cc") == "example.cc"
+    assert comment_without_heading("FALSE POSITIVE\nПуть недостижим.") == "Путь недостижим."
+    assert comment_without_heading("Обычный комментарий") == "Обычный комментарий"
+    assert list_text(["one", "two"]) == "• one\n• two"
