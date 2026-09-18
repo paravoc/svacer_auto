@@ -69,7 +69,7 @@ while ($true) {
             if ($LASTEXITCODE -ne 0) { Read-Host "Нажмите Enter" }
         }
         "2" {
-            & (Join-Path $PSScriptRoot "triage_dashboard.ps1")
+            & (Join-Path $PSScriptRoot "triage_gui.ps1")
         }
         "3" {
             & (Join-Path $PSScriptRoot "restart_svacer_http.ps1")

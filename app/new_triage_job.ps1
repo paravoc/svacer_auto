@@ -135,8 +135,8 @@ if (-not $NoOpen) {
     Start-Process explorer.exe -ArgumentList @($jobDir)
 }
 if (-not $NoDashboard) {
-    $dashboardScript = Join-Path $PSScriptRoot "triage_dashboard.ps1"
+    $dashboardScript = Join-Path $PSScriptRoot "triage_gui.ps1"
     $dashboardArguments = "-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$dashboardScript`" -JobDirectory `"$jobDir`""
-    # The user explicitly requested a visible interactive console dashboard.
+    # The user explicitly requested a visible interactive graphical dashboard.
     Start-Process -FilePath "powershell.exe" -ArgumentList $dashboardArguments
 }

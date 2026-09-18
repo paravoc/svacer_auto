@@ -10,6 +10,7 @@ $appFiles = @(
     'start_svacer_http.cmd', 'restart_svacer_http.ps1', 'restart_svacer_http.cmd',
     'stop_components.ps1', 'STOP SVACER.cmd', 'STOP ANALYZE.cmd', 'STOP ALL.cmd',
     'triage_dashboard.py', 'triage_dashboard.ps1', 'triage_dashboard.cmd',
+    'triage_gui.py', 'triage_gui.ps1', 'triage_gui.cmd',
     'make_portable_package.ps1', 'make_portable_package.cmd',
     'triage_queue.py', 'make_mcp_decisions_template.py', 'validate_mcp_decisions.py',
     'export_decisions_csv.py', 'extract_gost_markers.py', 'run_extractor.cmd',

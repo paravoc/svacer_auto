@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from test_mcp_pipeline import inventory, inventory_with_existing_review, run_script
 from triage_dashboard import collect_state, describe_exception, mcp_text, render, set_pause
+from triage_gui import format_count
 
 
 def write_json(path: Path, value) -> None:
@@ -152,3 +153,7 @@ def test_dashboard_shows_confirmed_verification_and_token_estimate(tmp_path):
     assert state["context"]["verifier_calls"] == 1
     assert "Проверка Confirmed: подтверждено 1/2" in output
     assert "Токены: ≈" in output
+
+
+def test_gui_formats_large_counts_for_readability():
+    assert format_count(514878) == "514 878"
