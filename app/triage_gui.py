@@ -15,6 +15,7 @@ from tkinter import messagebox, simpledialog, ttk
 from typing import Any, Callable
 
 from triage_dashboard import (
+    atomic_json,
     call_mcp_tool,
     check_mcp,
     collect_state,
@@ -93,6 +94,7 @@ class TriageGui:
         self.current_marker_id: str | None = None
 
         job_data = read_json(job / "job.json") if (job / "job.json").exists() else {}
+        self.job_data = job_data
         repository = str(job_data.get("repository_url") or "").rstrip("/").rsplit("/", 1)[-1]
         if repository.endswith(".git"):
             repository = repository[:-4]
@@ -135,6 +137,8 @@ class TriageGui:
         style.map("TNotebook.Tab", background=[("selected", SURFACE)], foreground=[("selected", TEXT)])
         style.configure("TCombobox", fieldbackground=SURFACE_2, background=SURFACE_2, foreground=TEXT, arrowcolor=TEXT)
         style.map("TCombobox", fieldbackground=[("readonly", SURFACE_2)], foreground=[("readonly", TEXT)])
+        style.configure("TRadiobutton", background=SURFACE, foreground=TEXT, font=("Segoe UI", 10))
+        style.map("TRadiobutton", background=[("active", SURFACE)], foreground=[("active", TEXT)])
 
     def build_ui(self) -> None:
         outer = ttk.Frame(self.root, padding=(20, 16, 20, 14))
@@ -158,10 +162,13 @@ class TriageGui:
         self.notebook.grid(row=1, column=0, sticky="nsew")
         self.overview_tab = ttk.Frame(self.notebook, padding=(0, 14, 0, 0))
         self.markers_tab = ttk.Frame(self.notebook, padding=(0, 14, 0, 0))
+        self.settings_tab = ttk.Frame(self.notebook, padding=(0, 14, 0, 0))
         self.notebook.add(self.overview_tab, text="Обзор")
         self.notebook.add(self.markers_tab, text="Маркеры")
+        self.notebook.add(self.settings_tab, text="Настройки")
         self.build_overview()
         self.build_markers()
+        self.build_settings()
         self.notebook.select(self.markers_tab)
 
         actions = ttk.Frame(outer)
@@ -303,6 +310,143 @@ class TriageGui:
         self.detail_text.pack(side="left", fill="both", expand=True)
         detail_scroll.pack(side="right", fill="y")
         self.render_empty_detail()
+
+    def build_settings(self) -> None:
+        container = ttk.Frame(self.settings_tab)
+        container.pack(fill="both", expand=True)
+
+        mode_panel = ttk.Frame(container, style="Surface.TFrame", padding=18)
+        mode_panel.pack(fill="x", pady=(0, 10))
+        ttk.Label(mode_panel, text="Режим обработки", style="Section.TLabel", background=SURFACE).pack(anchor="w")
+        ttk.Label(
+            mode_panel,
+            text="Режим применяется на границе партии и не прерывает уже работающих агентов.",
+            style="CardTitle.TLabel",
+        ).pack(anchor="w", pady=(3, 12))
+        self.run_mode_var = tk.StringVar(value=str(self.job_data.get("run_mode") or "until_complete"))
+        ttk.Radiobutton(
+            mode_panel, text="Одна партия — сохранить результаты и остановиться",
+            variable=self.run_mode_var, value="single_batch", command=self.update_mode_help,
+        ).pack(anchor="w", pady=3)
+        ttk.Radiobutton(
+            mode_panel, text="До завершения — автоматически брать следующие партии",
+            variable=self.run_mode_var, value="until_complete", command=self.update_mode_help,
+        ).pack(anchor="w", pady=3)
+        self.mode_help_var = tk.StringVar()
+        ttk.Label(mode_panel, textvariable=self.mode_help_var, style="CardTitle.TLabel", wraplength=1050).pack(anchor="w", pady=(10, 0))
+
+        capacity = ttk.Frame(container, style="Surface.TFrame", padding=18)
+        capacity.pack(fill="x", pady=(0, 10))
+        ttk.Label(capacity, text="Размер работы", style="Section.TLabel", background=SURFACE).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 12))
+        self.workers_var = tk.StringVar(value=str(self.job_data.get("parallel_workers") or 3))
+        self.batch_size_var = tk.StringVar(value=str(self.job_data.get("batch_size") or 15))
+        ttk.Label(capacity, text="Одновременных агентов", style="Surface.TLabel").grid(row=1, column=0, sticky="w")
+        ttk.Spinbox(capacity, from_=1, to=8, textvariable=self.workers_var, width=8).grid(row=1, column=1, sticky="w", padx=(12, 35))
+        ttk.Label(capacity, text="Маркеров в одной партии", style="Surface.TLabel").grid(row=1, column=2, sticky="w")
+        ttk.Spinbox(capacity, from_=1, to=50, textvariable=self.batch_size_var, width=8).grid(row=1, column=3, sticky="w", padx=(12, 0))
+        ttk.Label(
+            capacity,
+            text="Размер партии — общее количество маркеров на всех агентов. Фактическое число агентов может быть меньше, если в Codex недостаточно свободных слотов.",
+            style="CardTitle.TLabel", wraplength=1050,
+        ).grid(row=2, column=0, columnspan=4, sticky="w", pady=(10, 0))
+
+        presets = ttk.Frame(container, style="Surface.TFrame", padding=18)
+        presets.pack(fill="x", pady=(0, 10))
+        ttk.Label(presets, text="Готовые варианты", style="Section.TLabel", background=SURFACE).pack(anchor="w", pady=(0, 10))
+        preset_buttons = ttk.Frame(presets, style="Surface.TFrame")
+        preset_buttons.pack(fill="x")
+        ttk.Button(preset_buttons, text="По одному до конца", command=lambda: self.apply_preset(1, 1, "until_complete")).pack(side="left")
+        ttk.Button(preset_buttons, text="Одна партия из 15", command=lambda: self.apply_preset(3, 15, "single_batch")).pack(side="left", padx=8)
+        ttk.Button(preset_buttons, text="3 агента до конца", command=lambda: self.apply_preset(3, 15, "until_complete")).pack(side="left")
+
+        save_panel = ttk.Frame(container)
+        save_panel.pack(fill="x", pady=(4, 0))
+        ttk.Button(save_panel, text="Применить к этой задаче", command=lambda: self.save_execution_settings(False), style="Accent.TButton").pack(side="left")
+        ttk.Button(save_panel, text="Применить и сделать по умолчанию", command=lambda: self.save_execution_settings(True)).pack(side="left", padx=8)
+        ttk.Label(
+            save_panel,
+            text="Независимая проверка Confirmed остаётся включённой при любом режиме.",
+            style="Muted.TLabel",
+        ).pack(side="right")
+        self.update_mode_help()
+
+    def update_mode_help(self) -> None:
+        if self.run_mode_var.get() == "single_batch":
+            text = "После сохранения партии новая работа не выдаётся. Для следующей партии нажмите «Продолжить» и возобновите задачу Codex."
+        else:
+            text = "После сохранения партии Codex продолжает брать работу, пока не останется ожидающих маркеров или вы не нажмёте «Пауза»."
+        self.mode_help_var.set(text)
+
+    def apply_preset(self, workers: int, batch_size: int, run_mode: str) -> None:
+        self.workers_var.set(str(workers))
+        self.batch_size_var.set(str(batch_size))
+        self.run_mode_var.set(run_mode)
+        self.update_mode_help()
+        self.set_message("Вариант выбран. Нажмите «Применить», чтобы сохранить настройки.")
+
+    @staticmethod
+    def validated_execution_settings(workers: Any, batch_size: Any, run_mode: Any) -> tuple[int, int, str]:
+        try:
+            worker_count = int(workers)
+            marker_count = int(batch_size)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Число агентов и размер партии должны быть целыми числами.") from exc
+        if worker_count < 1 or worker_count > 8:
+            raise ValueError("Число агентов должно быть от 1 до 8.")
+        if marker_count < 1 or marker_count > 50:
+            raise ValueError("Размер партии должен быть от 1 до 50.")
+        mode = str(run_mode)
+        if mode not in {"single_batch", "until_complete"}:
+            raise ValueError("Выберите режим обработки.")
+        return worker_count, marker_count, mode
+
+    def save_execution_settings(self, save_defaults: bool) -> None:
+        try:
+            workers, batch_size, run_mode = self.validated_execution_settings(
+                self.workers_var.get(), self.batch_size_var.get(), self.run_mode_var.get()
+            )
+            job_data = read_json(self.job / "job.json")
+            job_data.update({
+                "parallel_workers": workers,
+                "batch_size": batch_size,
+                "run_mode": run_mode,
+            })
+            atomic_json(self.job / "job.json", job_data)
+            self.job_data = job_data
+
+            control_path = self.job / "control.json"
+            control = read_json(control_path) if control_path.exists() else {}
+            if not isinstance(control, dict):
+                control = {}
+            if run_mode == "until_complete":
+                control["single_batch_completed"] = False
+            else:
+                state = collect_state(self.job)
+                control["single_batch_completed"] = bool(
+                    state["completed"] and any(
+                        worker.get("current_status") == "saved" for worker in state["workers"].values()
+                    )
+                )
+            control["updated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+            control["source"] = "triage_gui settings"
+            atomic_json(control_path, control)
+
+            if save_defaults:
+                defaults = read_json(self.app_directory / "svacer-settings.json")
+                defaults.update({
+                    "parallel_workers": workers,
+                    "batch_size": batch_size,
+                    "run_mode": run_mode,
+                })
+                atomic_json(self.app_directory / "svacer-settings.json", defaults)
+            label = "для этой и новых задач" if save_defaults else "для этой задачи"
+            mode_label = "одна партия" if run_mode == "single_batch" else "до завершения"
+            self.set_message(
+                f"Настройки сохранены {label}: режим «{mode_label}», агентов {workers}, партия {batch_size}. Изменения действуют со следующей партии."
+            )
+            self.refresh()
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            self.set_message(f"Не удалось сохранить настройки: {exc}", error=True)
 
     def set_message(self, text: str, *, error: bool = False) -> None:
         self.message_var.set(text)

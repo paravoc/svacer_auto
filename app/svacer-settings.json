@@ -5,6 +5,7 @@
   "advanced_filter": "filter(markers, \"ГОСТ 71207-2024\" in .checker_labels)",
   "parallel_workers": 3,
   "batch_size": 15,
+  "run_mode": "single_batch",
   "verification_enabled": true,
   "verification_verdicts": ["Confirmed"],
   "verification_workers": 2,

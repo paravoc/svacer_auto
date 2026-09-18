@@ -18,6 +18,7 @@ $filterName = [string]$settings.filter_name
 $advancedFilter = [string]$settings.advanced_filter
 $parallelWorkers = [int]$settings.parallel_workers
 $batchSize = [int]$settings.batch_size
+$runMode = [string]$settings.run_mode
 $verificationEnabled = [bool]$settings.verification_enabled
 $verificationVerdicts = @($settings.verification_verdicts | ForEach-Object { [string]$_ })
 $verificationWorkers = [int]$settings.verification_workers
@@ -33,6 +34,9 @@ if ($parallelWorkers -lt 1 -or $parallelWorkers -gt 8) {
 }
 if ($batchSize -lt 1 -or $batchSize -gt 50) {
     throw "batch_size должен быть от 1 до 50"
+}
+if ($runMode -notin @('single_batch', 'until_complete')) {
+    throw "run_mode должен быть single_batch или until_complete"
 }
 if ($verificationWorkers -lt 1 -or $verificationWorkers -gt 8) {
     throw "verification_workers должен быть от 1 до 8"
@@ -95,6 +99,7 @@ $job = [ordered]@{
     advanced_filter = $advancedFilter
     parallel_workers = $parallelWorkers
     batch_size = $batchSize
+    run_mode = $runMode
     verification_enabled = $verificationEnabled
     verification_verdicts = $verificationVerdicts
     verification_workers = $verificationWorkers
@@ -124,7 +129,8 @@ if (-not $NoClipboard) {
 
 Write-Host ""
 Write-Host "Задача создана: $jobDir"
-Write-Host "Режим: одна задача Codex, до $parallelWorkers подагентов, партия $batchSize маркеров."
+$runModeText = if ($runMode -eq 'single_batch') { 'одна партия' } else { 'до завершения' }
+Write-Host "Режим: $runModeText, до $parallelWorkers подагентов, партия $batchSize маркеров."
 if (-not $NoClipboard) {
     Write-Host "Промпт скопирован в буфер обмена."
 }

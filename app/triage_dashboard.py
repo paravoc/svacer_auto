@@ -262,7 +262,10 @@ def collect_state(job: Path) -> dict:
     if control_path.exists():
         try:
             control = read_json(control_path)
-            state["paused"] = bool(control.get("pause_requested")) if isinstance(control, dict) else False
+            state["paused"] = (
+                bool(control.get("pause_requested") or control.get("single_batch_completed"))
+                if isinstance(control, dict) else False
+            )
         except (OSError, json.JSONDecodeError) as exc:
             state["errors"].append(f"control.json: {exc}")
 
@@ -443,6 +446,7 @@ def render(
 def set_pause(job: Path, paused: bool) -> None:
     atomic_json(job / "control.json", {
         "pause_requested": paused,
+        "single_batch_completed": False,
         "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
     })
 

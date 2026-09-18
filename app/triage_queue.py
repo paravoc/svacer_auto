@@ -35,6 +35,7 @@ VALID_CHALLENGE_TYPES = {
     "revision_mismatch",
 }
 VALID_CHALLENGE_VERDICTS = {"False Positive", "Won't fix", "Unclear"}
+VALID_RUN_MODES = {"single_batch", "until_complete"}
 HEADINGS = {
     "Confirmed": "CONFIRMED",
     "False Positive": "FALSE POSITIVE",
@@ -335,6 +336,63 @@ def pause_requested(decisions_path: Path) -> bool:
     if not isinstance(value, dict) or type(value.get("pause_requested", False)) is not bool:
         raise SystemExit("Некорректный control.json: pause_requested должен быть bool")
     return value.get("pause_requested", False)
+
+
+def job_run_mode(decisions_path: Path) -> str:
+    """Return the execution policy for the job containing decisions_path."""
+    path = decisions_path.parent / "job.json"
+    if not path.exists():
+        return "until_complete"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"Некорректный job.json: {exc}") from exc
+    mode = value.get("run_mode", "until_complete") if isinstance(value, dict) else None
+    if mode not in VALID_RUN_MODES:
+        raise SystemExit("job.json: run_mode должен быть single_batch или until_complete")
+    return str(mode)
+
+
+def single_batch_completed(decisions_path: Path) -> bool:
+    path = decisions_path.parent / "control.json"
+    if not path.exists():
+        return False
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"Некорректный control.json: {exc}") from exc
+    completed = value.get("single_batch_completed", False) if isinstance(value, dict) else None
+    if type(completed) is not bool:
+        raise SystemExit("Некорректный control.json: single_batch_completed должен быть bool")
+    return completed
+
+
+def primary_queue_blocked(decisions_path: Path) -> bool:
+    return pause_requested(decisions_path) or (
+        job_run_mode(decisions_path) == "single_batch" and single_batch_completed(decisions_path)
+    )
+
+
+def record_single_batch_completion(decisions_path: Path) -> bool:
+    """Block only the next primary batch; verification may still finish."""
+    if job_run_mode(decisions_path) != "single_batch":
+        return False
+    path = decisions_path.parent / "control.json"
+    value: dict = {}
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8-sig"))
+            if isinstance(loaded, dict):
+                value.update(loaded)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"Некорректный control.json: {exc}") from exc
+    value.update({
+        "single_batch_completed": True,
+        "updated_at": utc_now(),
+        "source": "run_mode:single_batch",
+    })
+    atomic_write_json(path, value)
+    return True
 
 
 def next_batch_number(job_directory: Path) -> int:
@@ -811,7 +869,12 @@ def main() -> int:
             raise SystemExit("--limit должен быть от 1 до 50")
         if args.workers < 1 or args.workers > 8:
             raise SystemExit("--workers должен быть от 1 до 8")
-        if pause_requested(decisions_path):
+        queue_paused = (
+            primary_queue_blocked(decisions_path)
+            if args.action == "next"
+            else pause_requested(decisions_path)
+        )
+        if queue_paused:
             result = {"progress": progress_payload(inventory, decisions), "paused": True, "batch": None}
             if args.action == "next":
                 record_assignments(decisions_path, None, paused=True)
@@ -845,6 +908,7 @@ def main() -> int:
                         triage_ids,
                     )
                     record_saved_workers(decisions_path, result_paths)
+                    result["paused_after_batch"] = record_single_batch_completion(decisions_path)
                 else:
                     result = apply_verification_results(
                         decisions,

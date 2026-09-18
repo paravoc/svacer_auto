@@ -158,6 +158,7 @@ def test_portable_archive_in_cyrillic_directory(tmp_path):
         assert job["advanced_filter"] == inventory()["filters_applied"]["advanced_filter"]
         assert job["app_directory"] == str(app / "app")
         assert job["parallel_workers"] == 3 and job["batch_size"] == 15
+        assert job["run_mode"] == "single_batch"
         assert job["verification_enabled"] is True
         assert job["verification_verdicts"] == ["Confirmed"]
         assert job["verification_workers"] == 2

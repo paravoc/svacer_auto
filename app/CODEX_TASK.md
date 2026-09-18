@@ -20,6 +20,8 @@
 - `advanced_filter` — точное выражение Svacer для отбора маркеров;
 - `parallel_workers` — желаемое максимальное число подагентов;
 - `batch_size` — общее число маркеров в одной партии;
+- `run_mode` — `single_batch` для остановки после одной партии или
+  `until_complete` для автоматической работы до конца очереди;
 - `verification_enabled`, `verification_verdicts`, `verification_workers` —
   обязательная независимая проверка `Confirmed`;
 - `saved_context_token_warning` — порог предупреждения панели для примерного
@@ -29,7 +31,8 @@
 - `job_directory`.
 
 Для старого job без трёх новых параметров используй совместимые значения:
-`parallel_workers = 3`, `batch_size = 15`, `app_directory` равен каталогу с
+`parallel_workers = 3`, `batch_size = 15`, `run_mode = until_complete`,
+`app_directory` равен каталогу с
 этим `CODEX_TASK.md`, `verification_enabled = true`,
 `verification_verdicts = ["Confirmed"]`, `verification_workers = 2`, а
 `tool_directory` — его родительскому каталогу. Сам старый `job.json` не изменяй.
@@ -106,6 +109,10 @@ file и line. Если эти поля совпадают, используй с
   --decisions "<job_directory>\decisions.jsonl" `
   next --limit <batch_size> --workers <parallel_workers>
 ```
+
+Перед каждым вызовом `next` перечитывай `job.json`: пользователь может изменить
+`parallel_workers`, `batch_size` и `run_mode` в графической панели. Уже выданную
+партию не перераспределяй; новые значения применяются только к следующей.
 
 Команда возвращает `trace_groups` и непересекающиеся `assignments`. Она
 группирует незавершённые маркеры по `warnClass + file`, распределяет их между
@@ -336,6 +343,15 @@ UNCLEAR
 Затем снова получай работу только командой `next`: именно на этой границе
 срабатывает кнопка паузы. Уже запущенную партию не прерывай и её результаты не
 теряй.
+
+При `run_mode = single_batch` команда `apply` автоматически закрывает выдачу
+следующей основной партии. Закончи независимую проверку Confirmed из уже
+сохранённой партии и остановись. После кнопки «Продолжить» пользователь при
+необходимости снова напишет в задаче Codex «продолжи». При
+`run_mode = until_complete` после проверки сразу запрашивай следующую партию,
+пока очередь не закончится или пользователь не нажмёт паузу. Комбинация
+`parallel_workers = 1`, `batch_size = 1`, `run_mode = until_complete` означает
+последовательную обработку по одному маркеру до конца.
 
 Если пользователь попросил пересмотреть конкретный вывод, верни его в очередь:
 

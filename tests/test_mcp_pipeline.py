@@ -304,6 +304,9 @@ def test_parallel_queue_and_atomic_worker_apply(tmp_path: Path) -> None:
     decisions_path = tmp_path / "decisions.jsonl"
     worker_1_path = tmp_path / "worker-1.json"
     worker_2_path = tmp_path / "worker-2.json"
+    (tmp_path / "job.json").write_text(
+        json.dumps({"run_mode": "single_batch"}), encoding="utf-8"
+    )
     inventory_path.write_text(json.dumps(inventory()), encoding="utf-8")
     created = run_script(
         "make_mcp_decisions_template.py",
@@ -359,8 +362,21 @@ def test_parallel_queue_and_atomic_worker_apply(tmp_path: Path) -> None:
         "--allowed-ids", "m1", "m2",
     )
     assert applied.returncode == 0, applied.stdout + applied.stderr
+    assert json.loads(applied.stdout)["paused_after_batch"] is True
     saved = [json.loads(line) for line in decisions_path.read_text().splitlines()]
     assert [item["verdict"] for item in saved] == ["False Positive", "False Positive"]
+    paused = run_script(
+        "triage_queue.py", "--inventory", str(inventory_path),
+        "--decisions", str(decisions_path), "next", "--limit", "1", "--workers", "1",
+    )
+    assert paused.returncode == 0
+    assert json.loads(paused.stdout)["paused"] is True
+    verification = run_script(
+        "triage_queue.py", "--inventory", str(inventory_path),
+        "--decisions", str(decisions_path), "verify-next", "--limit", "1", "--workers", "1",
+    )
+    assert verification.returncode == 0
+    assert "paused" not in json.loads(verification.stdout)
 
 
 def test_confirmed_requires_independent_verification(tmp_path: Path) -> None:

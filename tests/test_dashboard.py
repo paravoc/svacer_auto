@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 from test_mcp_pipeline import inventory, inventory_with_existing_review, run_script
 from triage_dashboard import collect_state, describe_exception, mcp_text, render, set_pause
-from triage_gui import comment_without_heading, format_count, list_text, short_file
+from triage_gui import TriageGui, comment_without_heading, format_count, list_text, short_file
 
 
 def write_json(path: Path, value) -> None:
@@ -164,3 +164,16 @@ def test_gui_marker_helpers_prepare_readable_details():
     assert comment_without_heading("FALSE POSITIVE\nПуть недостижим.") == "Путь недостижим."
     assert comment_without_heading("Обычный комментарий") == "Обычный комментарий"
     assert list_text(["one", "two"]) == "• one\n• two"
+
+
+def test_gui_validates_execution_settings():
+    assert TriageGui.validated_execution_settings("1", "1", "until_complete") == (
+        1, 1, "until_complete"
+    )
+    for values in ((0, 1, "until_complete"), (1, 51, "single_batch"), (1, 1, "bad")):
+        try:
+            TriageGui.validated_execution_settings(*values)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"Invalid settings were accepted: {values}")
